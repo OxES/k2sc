@@ -175,7 +175,9 @@ if __name__ == '__main__':
             if exists(args.logfile):
                 with open(args.logfile, 'w') as f:
                     pass
-        fh = logging.FileHandler(args.logfile)
+        logfile = open(args.logfile, 'a', buffering=1)
+        #fh = logging.FileHandler(args.logfile)
+        fh = logging.StreamHandler(logfile)
         fh.setFormatter(logging.Formatter('%(levelname)s %(name)s: %(message)s'))
         fh.setLevel(logging.DEBUG)
         logger.addHandler(fh)
