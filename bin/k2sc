@@ -1,0 +1,243 @@
+#!/usr/bin/env python
+from __future__ import print_function, division
+import os
+import sys
+import errno
+import warnings
+import logging
+
+import numpy as np
+import scipy as sp
+import pyfits as pf
+import matplotlib.pyplot as pl
+
+try:
+    from mpi4py import MPI
+    comm = MPI.COMM_WORLD
+    mpi_rank = comm.Get_rank()
+    mpi_size = comm.Get_size()
+    with_mpi = True
+except ImportError:
+    mpi_rank = 0
+    mpi_size = 1
+    with_mpi = False
+
+from copy import copy   
+from collections import namedtuple
+from matplotlib.backends.backend_pdf import PdfPages
+from numpy import any, array, ones_like, fromstring
+from numpy.random import normal
+
+from time import time, sleep
+from datetime import datetime
+from os.path import join, exists, abspath, basename
+from argparse import ArgumentParser
+
+from pyde.de import DiffEvol
+
+from k2sc.detrender import Detrender
+from k2sc.kernels import BasicKernel, BasicKernelInvScale, QuasiPeriodicKernel
+from k2sc.k2io import select_reader, FITSWriter
+from k2sc.cdpp import cdpp
+
+warnings.resetwarnings()
+warnings.filterwarnings('ignore', category=UserWarning, append=True)
+warnings.filterwarnings('ignore', category=DeprecationWarning, append=True)
+
+##TODO: Copy the FITS E0 header if a fits file is available
+##TODO: Define the covariance matrix splits for every campaign
+
+mpi_root = 0
+logging.basicConfig(level=logging.DEBUG, format='%(levelname)s %(name)s: %(message)s')
+
+def detrend(infile):
+    logger.name = 'Worker {:d}'.format(mpi_rank)
+    logger.info("Processing file {:s}".format(abspath(infile)))
+
+    if not exists(infile):
+        logger.warning("The input file {:s} doesn't exists, skipping the file".format(infile))
+        return
+
+    reader = select_reader(infile)
+    if reader is None:
+        logger.warning("Unrecognized file type for file {:s}, skipping the file".format(infile))
+        return
+
+    dataset = reader.read(infile)
+    fpath_out = join(args.save_dir, reader.fn_out_template.format(dataset.epic))
+
+    logger.name = 'Worker {:d} <{:d}>'.format(mpi_rank, dataset.epic)
+
+    dataset.mask_flares(args.flare_sigma, args.flare_erosion)
+    #dataset.mask_outliers(args.outlier_sigma, args.outlier_mwidth) # Screws up the rapidly pulsating stars
+
+    logger.info('Starting Lomb-Scargle period search')
+    dataset.search_for_periodicity(args.ls_min_period, args.ls_max_period)
+
+    if dataset.is_periodic:
+        kernel = QuasiPeriodicKernel(period=dataset.ls_period)
+        logger.info('Found periodicity p = {:7.2f} (power {:7.2f} > {:7.2f})'.format(dataset.ls_period, dataset.ls_power, args.ls_min_power))
+    else:
+        kernel = BasicKernelInvScale()
+        logger.info('No strong periodicity found: using an aperiodic kernel')
+
+
+    Result = namedtuple('SCResult', 'detrender pv tr_time tr_position cdpp_r cdpp_c warn')
+    results = []
+    for iset in range(dataset.nsets):
+        np.random.seed(args.seed)
+        inputs = np.transpose([dataset.time,dataset.x,dataset.y])
+        detrender = Detrender(dataset.fluxes[iset], inputs, mask=dataset.masks[iset],
+                              splits=splits, kernel=kernel, tr_nrandom=args.tr_nrandom,
+                              tr_nblocks=args.tr_nblocks, tr_bspan=args.tr_bspan)
+        de = DiffEvol(detrender.neglnposterior, kernel.bounds, args.de_npop)
+
+        if isinstance(kernel, QuasiPeriodicKernel):
+            de._population[:,2] = np.clip(normal(dataset.ls_period, 0.1*dataset.ls_period, size=de.n_pop),
+                                          args.ls_min_period, args.ls_max_period)
+
+
+        logger.info('Starting global hyperparameter optimisation using DE')
+        logger.info('    Population size: {:3d}                         '.format(args.de_npop))
+        logger.info('    Number of iterations: {:3d}                    '.format(args.de_niter))
+
+        tstart = time()
+        for i,r in enumerate(de(args.de_niter)):
+            tcur = time()
+            if ((de._fitness.ptp() < 3) or (tcur - tstart > args.de_max_time)) and (i>2):
+                break
+        logger.info('DE minimum found at: %s, ln(L) %4.1f', np.array_str(de.minimum_location, precision=3), de.minimum_value)
+
+        logger.info('Starting local hyperparameter optimisation')
+        try:
+            with warnings.catch_warnings():
+                warnings.filterwarnings('ignore', category=RuntimeWarning, append=True)
+                pv, warn = detrender.train(de.minimum_location)
+        except ValueError as e:
+            logger.error('Local optimiser failed, %s', e)
+            logger.error('Skipping the file')
+            return
+        logger.info('Local minimun found at: %s', np.array_str(pv, precision=3))
+
+        detrender.mask_outliers(pv=pv)
+        tr_time,tr_position = detrender.predict(pv, components=True)
+        cdpp_r = cdpp(detrender.data.masked_time, detrender.data.masked_flux)
+        cdpp_c = cdpp(detrender.data.unmasked_time, detrender.data.unmasked_flux-tr_time-tr_position, exclude=~detrender.data.mask)
+        results.append(Result(detrender, pv, tr_time, tr_position, cdpp_r, cdpp_c, warn))
+
+    FITSWriter.write(fpath_out, splits, dataset, results)
+    logger.info('Finished')
+
+
+if __name__ == '__main__':
+    ap = ArgumentParser(description='K2SC: K2 systematics correction using Gaussian processes')
+    gts = ap.add_argument_group('Training set options')
+    gps = ap.add_argument_group('Period search', description='Options to control the initial Lomb-Scargle period search')
+    gfd = ap.add_argument_group('Flare detection', description='Options to control the detection and masking of flares')
+    god = ap.add_argument_group('Outlier detection')
+    gde = ap.add_argument_group('Global optimisation', description='Options to control the global hyperparameter optimisation')
+    ap.add_argument('files', metavar = 'F', type=str, nargs='*', help='Input light curve file name.')
+    ap.add_argument('-c', '--campaign', metavar='C', type=int, help='Campaign number')
+    ap.add_argument('--splits', default=None, type=lambda s:fromstring(s.strip('[]'), sep=','), help='List of time values for kernel splits')
+    ap.add_argument('--quiet', action='store_true', default=False, help='suppress messages')
+    ap.add_argument('--save-dir', default='.', help='The directory to save the output file in')
+    ap.add_argument('--start-i', default=0, type=int)
+    ap.add_argument('--end-i', default=None, type=int)
+    ap.add_argument('--seed', default=0, type=int)
+    ap.add_argument('--logfile', default='', type=str)
+    gts.add_argument('--tr-nrandom', default=300, type=int, help='Number of random samples')
+    gts.add_argument('--tr-nblocks', default=6, type=int, help='Number of sample blocks')
+    gts.add_argument('--tr-bspan', default=50, type=int, help='Span of a single block')
+    gde.add_argument('--de-npop', default=100, type=int, help='Size of the differential evolution parameter vector population')
+    gde.add_argument('--de-niter', default=150, type=int, help='Number of differential evolution iterations')
+    gde.add_argument('--de-max-time', default=300, type=float, help='Maximum time used for differential evolution')
+    gps.add_argument('--ls-min-power', default=100, type=float, help='Lomb-Scargle power treshold for the periodic kernel')
+    gps.add_argument('--ls-min-period', default=0.20, type=float, help='Minimum period to search for')
+    gps.add_argument('--ls-max-period', default=20, type=float, help='Maximum period to search for')
+    gfd.add_argument('--flare-sigma', default=5, type=float)
+    gfd.add_argument('--flare-erosion', default=5, type=int)
+    god.add_argument('--outlier-sigma', default=10, type=float)
+    god.add_argument('--outlier-mwidth', default=5, type=int)
+    args = ap.parse_args()
+
+    csplits = {4: [2240,2273]}
+    
+    ## Logging
+    ##
+    logger = logging.getLogger(('Master' if mpi_rank==0 else 'Worker {:d}'.format(mpi_rank)))
+    if args.logfile:
+        if mpi_rank == 0:
+            if exists(args.logfile):
+                with open(args.logfile, 'w') as f:
+                    pass
+        fh = logging.FileHandler(args.logfile)
+        fh.setFormatter(logging.Formatter('%(levelname)s %(name)s: %(message)s'))
+        fh.setLevel(logging.DEBUG)
+        logger.addHandler(fh)
+
+
+    if args.splits is None:
+        splits = csplits[args.campaign]
+    else:
+        splits = args.splits
+
+    if not exists(args.save_dir):
+        logger.error("Error: the save directory {:s} doesn't exists".format(args.save_dir), file=sys.stderr)
+        exit(errno.ENOENT)
+
+    all_items = args.files[args.start_i:args.end_i]
+    items = copy(all_items)
+    n_items = len(items)
+
+    ## Without MPI or running with a one node
+    ## ======================================
+    if (not with_mpi) or (mpi_size==1):
+        logger.info("Detrending {:d} light curves without MPI".format(n_items))
+        for infile in args.files[args.start_i:args.end_i]:
+            detrend(infile)
+
+    ## With MPI
+    ## ========
+    else:
+        if mpi_rank == 0:
+            logger.info("Detrending {:d} light curves using {:d} worker nodes".format(n_items, mpi_size-1))
+
+        ## Master node
+        ## -----------
+        if mpi_rank == 0:
+            free_workers = range(1,mpi_size)
+            active_workers = []
+            n_finished_items = 0
+
+            while items or active_workers:
+                ## Send an item
+                while items and free_workers:
+                    w = free_workers.pop()
+                    comm.send(items.pop(), dest=w, tag=0)
+                    active_workers.append(w)
+
+                ## Receive the results
+                for w in active_workers:
+                    if comm.Iprobe(w, 2):
+                        res = comm.recv(source=w, tag=2)
+                        free_workers.append(w)
+                        active_workers.remove(w)
+                        n_finished_items += 1
+                        logger.info("Finished {:3d} of {:3d} light curves".format(n_finished_items,n_items))
+                sleep(0.25)
+
+            for w in free_workers:
+                comm.send(-1, dest=w, tag=0)
+
+        ## Worker node
+        ## -----------
+        else:
+            while True:
+                infile = comm.recv(source=mpi_root, tag=0)
+                if infile == -1:
+                    break
+                detrend(infile)
+                comm.send(infile, dest=mpi_root, tag=2)    
+
+
+        
