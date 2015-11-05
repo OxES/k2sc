@@ -86,6 +86,7 @@ def detrend(infile):
     results = []
     for iset in range(dataset.nsets):
         np.random.seed(args.seed)
+        tstart = time()
         inputs = np.transpose([dataset.time,dataset.x,dataset.y])
         detrender = Detrender(dataset.fluxes[iset], inputs, mask=dataset.masks[iset],
                               splits=splits, kernel=kernel, tr_nrandom=args.tr_nrandom,
@@ -98,15 +99,14 @@ def detrend(infile):
 
 
         logger.info('Starting global hyperparameter optimisation using DE')
-        logger.info('    Population size: {:3d}                         '.format(args.de_npop))
-        logger.info('    Number of iterations: {:3d}                    '.format(args.de_niter))
-
-        tstart = time()
+        tstart_de = time()
         for i,r in enumerate(de(args.de_niter)):
-            tcur = time()
-            if ((de._fitness.ptp() < 3) or (tcur - tstart > args.de_max_time)) and (i>2):
+            tcur_de = time()
+            if ((de._fitness.ptp() < 3) or (tcur_de - tstart_de > args.de_max_time)) and (i>2):
                 break
-        logger.info('DE minimum found at: %s, ln(L) %4.1f', np.array_str(de.minimum_location, precision=3), de.minimum_value)
+        logger.info('DE finished in %i seconds', tcur_de-tstart_de)
+        logger.info('DE minimum found at: %s', np.array_str(de.minimum_location, precision=3, max_line_width=250))
+        logger.info('DE ln(L) %4.1f', de.minimum_value)
 
         logger.info('Starting local hyperparameter optimisation')
         try:
@@ -119,11 +119,16 @@ def detrend(infile):
             return
         logger.info('Local minimun found at: %s', np.array_str(pv, precision=3))
 
+        logger.info('Masking outliers')
         detrender.mask_outliers(pv=pv)
+        logger.info('Computing time and position trends')
         tr_time,tr_position = detrender.predict(pv, components=True)
         cdpp_r = cdpp(detrender.data.masked_time, detrender.data.masked_flux)
         cdpp_c = cdpp(detrender.data.unmasked_time, detrender.data.unmasked_flux-tr_time-tr_position, exclude=~detrender.data.mask)
         results.append(Result(detrender, pv, tr_time, tr_position, cdpp_r, cdpp_c, warn))
+        logger.info('Raw CDPP %6.3f', cdpp_r)
+        logger.info('Detrended CDPP %6.3f', cdpp_c)
+        logger.info('Detrending time %6.3f', time()-tstart)
 
     FITSWriter.write(fpath_out, splits, dataset, results)
     logger.info('Finished')
@@ -189,19 +194,29 @@ if __name__ == '__main__':
     items = copy(all_items)
     n_items = len(items)
 
-    ## Without MPI or running with a one node
-    ## ======================================
+    if mpi_rank == 0:
+        if (not with_mpi) or (mpi_size==1):
+            logger.info("Detrending {:d} light curves without MPI".format(n_items))
+        else:
+            logger.info("Detrending {:d} light curves using {:d} worker nodes".format(n_items, mpi_size-1))
+        logger.info('')
+        logger.info('Saving the results to %s', args.save_dir)
+        logger.info('')
+        logger.info('Differential evolution parameters')
+        logger.info('  Population size: {:3d}'.format(args.de_npop))
+        logger.info('  Number of iterations: {:3d}'.format(args.de_niter))
+        logger.info('  Maximum DE time: {:6.2f} seconds'.format(args.de_max_time))
+        logger.info('')
+
+    ## Without MPI or running with a single node
+    ## =========================================
     if (not with_mpi) or (mpi_size==1):
-        logger.info("Detrending {:d} light curves without MPI".format(n_items))
         for infile in args.files[args.start_i:args.end_i]:
             detrend(infile)
 
     ## With MPI
     ## ========
     else:
-        if mpi_rank == 0:
-            logger.info("Detrending {:d} light curves using {:d} worker nodes".format(n_items, mpi_size-1))
-
         ## Master node
         ## -----------
         if mpi_rank == 0:
