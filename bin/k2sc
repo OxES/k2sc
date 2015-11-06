@@ -33,12 +33,11 @@ from datetime import datetime
 from os.path import join, exists, abspath, basename
 from argparse import ArgumentParser
 
-from pyde.de import DiffEvol
-
 from k2sc.detrender import Detrender
 from k2sc.kernels import BasicKernel, BasicKernelInvScale, QuasiPeriodicKernel
 from k2sc.k2io import select_reader, FITSWriter
 from k2sc.cdpp import cdpp
+from k2sc.de import DiffEvol
 
 warnings.resetwarnings()
 warnings.filterwarnings('ignore', category=UserWarning, append=True)
