@@ -51,8 +51,15 @@ mpi_root = 0
 logging.basicConfig(level=logging.DEBUG, format='%(levelname)s %(name)s: %(message)s')
 
 def detrend(infile):
-    logger.name = 'Worker {:d}'.format(mpi_rank)
-    logger.info("Processing file {:s}".format(abspath(infile)))
+    logger  = logging.getLogger('Worker %i'%mpi_rank)
+    logfile = open('{:s}.{:03d}'.format(args.logfile, mpi_rank), mode='w')
+    fh = logging.StreamHandler(logfile)
+    #fh = logging.FileHandler('{:s}.{:03d}'.format(args.logfile, mpi_rank), mode='w')
+    fh.setFormatter(logging.Formatter('%(levelname)s %(name)s: %(message)s'))
+    fh.setLevel(logging.DEBUG)
+    logger.addHandler(fh)
+
+    logger.info("Processing file %s",abspath(infile))
 
     if not exists(infile):
         logger.warning("The input file {:s} doesn't exists, skipping the file".format(infile))
@@ -132,6 +139,11 @@ def detrend(infile):
 
     FITSWriter.write(fpath_out, splits, dataset, results)
     logger.info('Finished')
+    fh.flush()
+    logger.removeHandler(fh)
+    fh.close()
+    logfile.close()
+    #fh.close()
 
 
 if __name__ == '__main__':
@@ -169,19 +181,15 @@ if __name__ == '__main__':
     
     ## Logging
     ##
-    logger = logging.getLogger(('Master' if mpi_rank==0 else 'Worker {:d}'.format(mpi_rank)))
-    if args.logfile:
-        if mpi_rank == 0:
-            if exists(args.logfile):
-                with open(args.logfile, 'w') as f:
-                    pass
-        logfile = open(args.logfile, 'a', buffering=1)
-        #fh = logging.FileHandler(args.logfile)
-        fh = logging.StreamHandler(logfile)
-        fh.setFormatter(logging.Formatter('%(levelname)s %(name)s: %(message)s'))
-        fh.setLevel(logging.DEBUG)
-        logger.addHandler(fh)
-
+    if mpi_rank == 0:
+        logger = logging.getLogger('Master')
+        if args.logfile:
+            logfile = open(args.logfile, mode='w')
+            fh = logging.StreamHandler(logfile)
+            #fh = logging.FileHandler(args.logfile, mode='w')
+            fh.setFormatter(logging.Formatter('%(levelname)s %(name)s: %(message)s'))
+            fh.setLevel(logging.DEBUG)
+            logger.addHandler(fh)
 
     if args.splits is None:
         splits = csplits[args.campaign]
@@ -240,7 +248,13 @@ if __name__ == '__main__':
                         free_workers.append(w)
                         active_workers.remove(w)
                         n_finished_items += 1
+
+                        if args.logfile:
+                            logfile_w = open('{:s}.{:03d}'.format(args.logfile, w), 'r')
+                            logfile.write(logfile_w.read())
+                            logfile_w.close()
                         logger.info("Finished {:3d} of {:3d} light curves".format(n_finished_items,n_items))
+
                 sleep(0.25)
 
             for w in free_workers:
