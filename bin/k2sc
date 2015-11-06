@@ -54,7 +54,6 @@ def detrend(infile):
     logger  = logging.getLogger('Worker %i'%mpi_rank)
     logfile = open('{:s}.{:03d}'.format(args.logfile, mpi_rank), mode='w')
     fh = logging.StreamHandler(logfile)
-    #fh = logging.FileHandler('{:s}.{:03d}'.format(args.logfile, mpi_rank), mode='w')
     fh.setFormatter(logging.Formatter('%(levelname)s %(name)s: %(message)s'))
     fh.setLevel(logging.DEBUG)
     logger.addHandler(fh)
@@ -143,7 +142,6 @@ def detrend(infile):
     logger.removeHandler(fh)
     fh.close()
     logfile.close()
-    #fh.close()
 
 
 if __name__ == '__main__':
@@ -186,7 +184,6 @@ if __name__ == '__main__':
         if args.logfile:
             logfile = open(args.logfile, mode='w')
             fh = logging.StreamHandler(logfile)
-            #fh = logging.FileHandler(args.logfile, mode='w')
             fh.setFormatter(logging.Formatter('%(levelname)s %(name)s: %(message)s'))
             fh.setLevel(logging.DEBUG)
             logger.addHandler(fh)
