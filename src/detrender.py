@@ -27,7 +27,7 @@ class Detrender(object):
         self.data   = DtData(flux, inputs, mask)
         self.kernel = kernel or BasicKernel()
         self.gp     = SplitGP(self.kernel, splits) if splits is not None else GeorgeGP(self.kernel)
-        #self.mask_outliers(max_sigma=5, pv=self.kernel._pv)
+        self.mask_outliers(max_sigma=5, pv=self.kernel._pv)
         self.tr_data  = self.data.create_training_set(tr_nrandom, tr_bspan, tr_nblocks)
         self.gp.set_inputs(self.tr_data.masked_inputs)
 
@@ -86,8 +86,8 @@ class Detrender(object):
 
         if components:
             mu_time, mu_pos = self.gp.predict_components(inputs)
-            return (mu_time * self.data._fs + self.data._fm, 
-                    mu_pos  * self.data._fs + self.data._fm)
+            return ((1. + mu_time) * self.data._fm,
+                    (1. + mu_pos)  * self.data._fm)
         else:
             return self.gp.predict(inputs, mean_only=mean_only)
     
@@ -255,11 +255,11 @@ class DtData(object):
 
     @property
     def masked_normalised_flux(self):
-        return (self.flux[self.mask] - self._fm) / self._fs
+        return self.flux[self.mask] / self._fm - 1.
 
     @property
     def unmasked_normalised_flux(self):
-        return (self.flux - self._fm) / self._fs
+        return self.flux / self._fm - 1.
 
     @property
     def masked_inputs(self):
