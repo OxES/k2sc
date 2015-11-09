@@ -106,7 +106,7 @@ def detrend(infile):
         logger.info('Starting global hyperparameter optimisation using DE')
         tstart_de = time()
         for i,r in enumerate(de(args.de_niter)):
-            logger.info('DE iteration %i -ln(L) %4.1f', i, de.minimum_value)
+            logger.info('DE iteration %3i -ln(L) %4.1f', i, de.minimum_value)
             tcur_de = time()
             if ((de._fitness.ptp() < 3) or (tcur_de - tstart_de > args.de_max_time)) and (i>2):
                 break
