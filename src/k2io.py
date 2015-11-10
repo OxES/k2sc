@@ -84,8 +84,8 @@ class MASTReader(DataReader):
                       time=data['time'],
                       cadence=data['cadenceno'],
                       quality=data['sap_quality'],
-                      fluxes=data['sap_flux'],
-                      errors=data['sap_flux_err'],
+                      fluxes=data['pdcsap_flux'],
+                      errors=data['pdcsap_flux_err'],
                       x=data['pos_corr1'],
                       y=data['pos_corr2'],
                       sap_header=head)    
