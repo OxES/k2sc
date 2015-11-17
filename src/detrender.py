@@ -27,7 +27,7 @@ class Detrender(object):
         self.data   = DtData(flux, inputs, mask)
         self.kernel = kernel or BasicKernel()
         self.gp     = SplitGP(self.kernel, splits) if splits is not None else GeorgeGP(self.kernel)
-        self.mask_outliers(max_sigma=5, pv=self.kernel._pv)
+        #self.mask_outliers(max_sigma=5, pv=self.kernel._pv)
         self.tr_data  = self.data.create_training_set(tr_nrandom, tr_bspan, tr_nblocks)
         self.gp.set_inputs(self.tr_data.masked_inputs)
 
