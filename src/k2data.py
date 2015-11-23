@@ -12,6 +12,79 @@ from scipy.signal import medfilt
 from ls import fasper
 from utils import medsig
 
+class K2MultiStarData(K2Data):
+    """Encapsulates the K2 data.
+
+    Encapsulates the K2 data with 1..n flux and flux uncertainty arrays for a number of stars.
+    Separate flux and uncertainty arrays can correspond to different aperture sizes, etc.
+
+    Notes
+    -----
+    We remove the cadences where either time, x, or y is nan since input nans screw 
+    up the GP fitting and reduction. This must be accounted for when saving the data.
+
+    Parameters
+    ----------
+    epic    : array_like [nexp]
+              EPIC numbers of the stars
+    time    : array_like [nexp]
+              ndarray or list containing the time values
+    cadence : array_like [nexp]
+              ndarray or list containing the cadence values
+    quality : array_like [nstars,nexp]
+              ndarray or list containing quality value lists
+    fluxes  : array_like [nstars,nsets,npoints] 
+              ndarray of flux values
+    errors  : array_like [nstars,nsets,npoints] 
+              ndarray of flux values
+    x       : array_like [nstars,nexp] 
+              ndarray or list of x value lists
+    y       : array_like [nstars,nexp] 
+              ndarray or list of y value lists
+
+    Attributes
+    ----------
+    nstars      : int
+                  Number of stars
+    nsets       : int
+                  Number of apertures per star
+    npoints     : int
+                  Number of datapoints
+    is_periodic : bool
+                  Does the flux show clear periodic variability
+    ls_period   : float
+                  Period of the strongest periodic variability detected
+    ls_power    : float
+                  Lomb-Scargle power of the strongest periodic variability detected
+    """
+    def __init__(self, epic, time, cadence, quality, fluxes, errors, x, y, sap_header=None):
+        self.epic = epic
+        self.nanmask = nm = isfinite(time) & all(isfinite(x), 0) & all(isfinite(y), 0)
+        self.time = extract(nm, time)
+        self.cadence = extract(nm, cadence)
+        self.quality = extract(nm, quality).astype(np.int)
+        self.fluxes = atleast_3d(fluxes)[:,:,nm]
+        self.errors = atleast_3d(errors)[:,:,nm]
+        self.x = atleast_2d(x)[:,nm]
+        self.y = atleast_2d(x)[:,nm]
+        self.sap_header = sap_header
+
+        self.nstars  = self.fluxes.shape[0]
+        self.nsets   = self.fluxes.shape[1]
+        self.npoints = self.fluxes.shape[2]
+        self.istar   = 0
+
+        self.kmask    = all(isfinite(self.fluxes),1) & (self.quality==0)
+        self.fmasks   = ones([self.nsets, self.npoints], np.bool)
+        self.omasks_u = ones_like(self.fmasks)
+        self.omasks_d = ones_like(self.fmasks)
+        self.masks    = tile(self.kmask, [self.nsets,1])
+        
+        self.is_periodic = False
+        self.ls_period = None
+        self.ls_power = None
+
+
 class K2Data(object):
     """Encapsulates the K2 data.
 
@@ -34,9 +107,9 @@ class K2Data(object):
     quality : array_like
               ndarray or list containing the quality values
     fluxes  : array_like
-              a list, multiple lists or [nsets,npoints] ndarray of flux values
+              a list, multiple lists, or [nsets,npoints] ndarray of flux values
     errors  : array_like
-              a list, multiple lists or [nsets,npoints] ndarray of flux values
+              a list, multiple lists, or [nsets,npoints] ndarray of flux values
     x       : array_like
               ndarray or list of x values
     y       : array_like

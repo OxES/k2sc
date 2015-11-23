@@ -35,7 +35,7 @@ from argparse import ArgumentParser
 
 from k2sc.detrender import Detrender
 from k2sc.kernels import BasicKernel, BasicKernelInvScale, QuasiPeriodicKernel
-from k2sc.k2io import select_reader, FITSWriter
+from k2sc.k2io import select_reader, FITSWriter, SPLOXReader
 from k2sc.cdpp import cdpp
 from k2sc.de import DiffEvol
 
@@ -201,6 +201,13 @@ if __name__ == '__main__':
     all_items = args.files[args.start_i:args.end_i]
     items = copy(all_items)
     n_items = len(items)
+
+    ## Check if we're dealing with a single input file with many stars
+    if n_items == 1 and SPLOXReader.can_read(items[0]):
+        multifile = True
+    else:
+        multifile = False
+        
 
     if mpi_rank == 0:
         if (not with_mpi) or (mpi_size==1):

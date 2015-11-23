@@ -12,6 +12,7 @@ import re
 import pyfits as pf
 from os.path import basename, splitext
 from datetime import datetime
+from collections import namedtuple
 
 from k2data import K2Data
 
@@ -107,26 +108,31 @@ class SPLOXReader(DataReader):
     extensions = ['.fits', '.fit']
     ndatasets = 6
     fn_out_template = 'EPIC_{:9d}_reb.fits'
+    _cache = None
 
     @classmethod
-    def read(cls, fname, **kwargs):
-        ftype = 'sap_flux' if kwargs.get('type','sap').lower() == 'sap' else 'pdcsap_flux'
-        epic = int(re.findall('ktwo([0-9]+)-c', basename(fname))[0])
-        with pf.open(fname) as fin:
-            data = fin[1].data
-            nobj = fin[1].header['naxis2']
-            nexp = fin[2].header['naxis2']
-            fluxes = (1. + data['f'].reshape([nobj,nexp,-1])) * data['f_med'][:,np.newaxis,:]
+    def read(cls, fname, sid, **kwargs):
+        cache = namedtuple('K2Cache', 'fname objno nobj nexp time cadence quality fluxes errors x y header')
+        if not cls._cache or cls._cache.fname != fname:
+            with pf.open(fname) as fin:
+                data = fin[1].data
+                nobj = fin[1].header['naxis2']
+                nexp = fin[2].header['naxis2']
+                fluxes = (1. + data['f'].reshape([nobj,nexp,-1])) * data['f_med'][:,np.newaxis,:]
+                fluxes = np.swapaxes(fluxes, 1, 2) # Fluxes as [nobj,napt,nexp] ndarray            
+                cls._cache = cache(fname, fin[1].data['objno'], nobj, nexp, fin[2].data['mjd_obs'],
+                                   fin[2].data['cadence'], np.zeros(nexp, np.int), fluxes,
+                                   np.zeros_like(fluxes), data['x'], data['y'], sap_header=fin[0].header)
 
-            return K2Data(fin[1].data['objno'],
-                          time=fin[2].data['mjd_obs'],
-                          cadence=fin[2].data['cadence'],
-                          quality=np.zeros(nexp),
-                          fluxes=fluxes,
-                          errors=np.zeros_like(fluxes),
-                          x=data['x'],
-                          y=data['y'],
-                          sap_header=fin[0].header)    
+        return K2Data(csl._cache.objno[sid],
+                      time=cls._cache.time,
+                      cadence=cls._cache.cadence,
+                      quality=cls._cache.quality,
+                      fluxes=cls._cache.fluxes[sid,:,:],
+                      errors=cls._cache.errors[sid,:,:],
+                      x=cls._cache.x[sid,:],
+                      y=cls._cache.y[sid,:],
+                      sap_header=cls._cache.header)    
     
     @classmethod
     def can_read(cls, fname):
