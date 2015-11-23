@@ -103,6 +103,43 @@ class MASTReader(DataReader):
             return fmt_ok
         
 
+class SPLOXReader(DataReader):
+    extensions = ['.fits', '.fit']
+    ndatasets = 6
+    fn_out_template = 'EPIC_{:9d}_reb.fits'
+
+    @classmethod
+    def read(cls, fname, **kwargs):
+        ftype = 'sap_flux' if kwargs.get('type','sap').lower() == 'sap' else 'pdcsap_flux'
+        epic = int(re.findall('ktwo([0-9]+)-c', basename(fname))[0])
+        with pf.open(fname) as fin:
+            data = fin[1].data
+            nobj = fin[1].header['naxis2']
+            nexp = fin[2].header['naxis2']
+            fluxes = (1. + data['f'].reshape([nobj,nexp,-1])) * data['f_med'][:,np.newaxis,:]
+
+            return K2Data(fin[1].data['objno'],
+                          time=fin[2].data['mjd_obs'],
+                          cadence=fin[2].data['cadence'],
+                          quality=np.zeros(nexp),
+                          fluxes=fluxes,
+                          errors=np.zeros_like(fluxes),
+                          x=data['x'],
+                          y=data['y'],
+                          sap_header=fin[0].header)    
+    
+    @classmethod
+    def can_read(cls, fname):
+        ext_ok = cls.is_extension_valid(fname)
+        if not ext_ok:
+            return False
+        else:
+            h = pf.getheader(fname, 1)
+            fmt_ok = 'F_SCATTER' in h.values()
+            return fmt_ok
+
+
+
 ## ===  WRITERS  ===
 ## =================
 
