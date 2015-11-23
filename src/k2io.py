@@ -32,7 +32,7 @@ class DataReader(object):
         raise NotImplementedError
 
     @classmethod
-    def read(cls, fname):
+    def read(cls, fname, **kwargs):
         raise NotImplementedError
 
     @classmethod
@@ -50,7 +50,7 @@ class AMCReader(DataReader):
     fn_out_template = 'EPIC_{:9d}_amc.fits'
 
     @classmethod
-    def read(cls, fname):
+    def read(cls, fname, **kwargs):
         epic = int(re.findall('EPIC_([0-9]+)_', basename(fname))[0])
         data = np.loadtxt(fname, skiprows=1)
         return K2Data(epic,
@@ -74,9 +74,11 @@ class MASTReader(DataReader):
     extensions = ['.fits', '.fit']
     ndatasets = 1
     fn_out_template = 'EPIC_{:9d}_sap.fits'
+    allowed_types = ['sap', 'pdc']
 
     @classmethod
-    def read(cls, fname):
+    def read(cls, fname, **kwargs):
+        ftype = 'sap_flux' if kwargs.get('type','sap').lower() == 'sap' else 'pdcsap_flux'
         epic = int(re.findall('ktwo([0-9]+)-c', basename(fname))[0])
         data = pf.getdata(fname, 1)
         head = pf.getheader(fname, 0)
@@ -84,8 +86,8 @@ class MASTReader(DataReader):
                       time=data['time'],
                       cadence=data['cadenceno'],
                       quality=data['sap_quality'],
-                      fluxes=data['pdcsap_flux'],
-                      errors=data['pdcsap_flux_err'],
+                      fluxes=data[ftype],
+                      errors=data[ftype+'_err'],
                       x=data['pos_corr1'],
                       y=data['pos_corr2'],
                       sap_header=head)    
@@ -97,7 +99,7 @@ class MASTReader(DataReader):
             return False
         else:
             h = pf.getheader(fname, 1)
-            fmt_ok = 'PDCSAP_FLUX' in h.values()
+            fmt_ok = 'SAP_FLUX' in h.values()
             return fmt_ok
         
 
