@@ -102,6 +102,36 @@ class MASTReader(DataReader):
             fmt_ok = 'SAP_FLUX' in h.values()
             return fmt_ok
         
+class smearReader(DataReader):
+    extensions = ['.fits', '.csv']
+    ndatasets = 1
+    fn_out_template = 'hr1185.fits'
+
+    @classmethod
+    def read(cls, fname):
+        epic = 200000000
+        data = pf.getdata(fname, 1)
+        head = pf.getheader(fname, 0)
+        return K2Data(epic,
+                      time=data['BJD'],
+                      cadence=data['CAD'],
+                      quality=data['QUALITY'],
+                      fluxes=data['FLUX'],
+                      errors=data['FLUX_ERR'],
+                      x=data['POS_CORR1'],
+                      y=data['POS_CORR2'],
+                      sap_header=head)    
+    
+    @classmethod
+    def can_read(cls, fname):
+        ext_ok = cls.is_extension_valid(fname)
+        if not ext_ok:
+            return False
+        else:
+            h = pf.getheader(fname, 1)
+            fmt_ok = 'BJD' in h.values()
+            return fmt_ok
+        
 
 ## ===  WRITERS  ===
 ## =================
@@ -153,9 +183,10 @@ class FITSWriter(object):
         primary_hdu = pf.PrimaryHDU(header=data.sap_header)
         hdu_list = pf.HDUList([primary_hdu, hdu])
         hdu_list.writeto(fname, clobber=True)
+        print 'Saved to', fname
 
 
-readers = [AMCReader,MASTReader]
+readers = [AMCReader,MASTReader,smearReader]
 
 def select_reader(fname):
     for R in readers:
