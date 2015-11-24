@@ -109,7 +109,8 @@ class SPLOXReader(DataReader):
     ndatasets = 6
     fn_out_template = 'EPIC_{:9d}_reb.fits'
     _cache = None
-
+    _nstars = None
+    
     @classmethod
     def read(cls, fname, sid, **kwargs):
         cache = namedtuple('K2Cache', 'fname objno nobj nexp time cadence quality fluxes errors x y header')
@@ -119,12 +120,13 @@ class SPLOXReader(DataReader):
                 nobj = fin[1].header['naxis2']
                 nexp = fin[2].header['naxis2']
                 fluxes = (1. + data['f'].reshape([nobj,nexp,-1])) * data['f_med'][:,np.newaxis,:]
-                fluxes = np.swapaxes(fluxes, 1, 2) # Fluxes as [nobj,napt,nexp] ndarray            
+                fluxes = np.swapaxes(fluxes, 1, 2) # Fluxes as [nobj,napt,nexp] ndarray
+                cls._nstars = nobj         
                 cls._cache = cache(fname, fin[1].data['objno'], nobj, nexp, fin[2].data['mjd_obs'],
                                    fin[2].data['cadence'], np.zeros(nexp, np.int), fluxes,
-                                   np.zeros_like(fluxes), data['x'], data['y'], sap_header=fin[0].header)
+                                   np.zeros_like(fluxes), data['x'], data['y'], fin[0].header)
 
-        return K2Data(csl._cache.objno[sid],
+        return K2Data(cls._cache.objno[sid],
                       time=cls._cache.time,
                       cadence=cls._cache.cadence,
                       quality=cls._cache.quality,
@@ -133,6 +135,12 @@ class SPLOXReader(DataReader):
                       x=cls._cache.x[sid,:],
                       y=cls._cache.y[sid,:],
                       sap_header=cls._cache.header)    
+
+    
+    @classmethod
+    def nstars(cls, fname):
+        return pf.getval(fname, 'naxis2', 1)
+
     
     @classmethod
     def can_read(cls, fname):
@@ -198,7 +206,7 @@ class FITSWriter(object):
         hdu_list.writeto(fname, clobber=True)
 
 
-readers = [AMCReader,MASTReader]
+readers = [AMCReader,MASTReader,SPLOXReader]
 
 def select_reader(fname):
     for R in readers:

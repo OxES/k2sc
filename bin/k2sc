@@ -49,7 +49,7 @@ warnings.filterwarnings('ignore', category=DeprecationWarning, append=True)
 mpi_root = 0
 logging.basicConfig(level=logging.DEBUG, format='%(levelname)s %(name)s: %(message)s')
 
-def detrend(infile, ftype):
+def detrend(dataset, ftype):
     logger  = logging.getLogger('Worker %i'%mpi_rank)
     logfile = open('{:s}.{:03d}'.format(args.logfile, mpi_rank), mode='w')
     fh = logging.StreamHandler(logfile)
@@ -57,18 +57,6 @@ def detrend(infile, ftype):
     fh.setLevel(logging.DEBUG)
     logger.addHandler(fh)
 
-    logger.info("Processing file %s",abspath(infile))
-
-    if not exists(infile):
-        logger.warning("The input file {:s} doesn't exists, skipping the file".format(infile))
-        return
-
-    reader = select_reader(infile)
-    if reader is None:
-        logger.warning("Unrecognized file type for file {:s}, skipping the file".format(infile))
-        return
-
-    dataset = reader.read(infile, type=ftype)
     fpath_out = join(args.save_dir, reader.fn_out_template.format(dataset.epic))
 
     logger.name = 'Worker {:d} <{:d}>'.format(mpi_rank, dataset.epic)
@@ -198,16 +186,26 @@ if __name__ == '__main__':
         logger.error("Error: the save directory {:s} doesn't exists".format(args.save_dir), file=sys.stderr)
         exit(errno.ENOENT)
 
-    all_items = args.files[args.start_i:args.end_i]
+    ## Select data reader
+    ## NOTE: We don't allow mixed input types per run
+    reader = select_reader(args.files[0])
+    if reader is None:
+        logger.critical("Unrecognized input file type for file {:s}".format(args.files[0]))
+        exit()
+                
+    ## Check if we're dealing with a single input file with many stars
+    if len(args.files) == 1 and isinstance(reader, SPLOXReader):
+        singlefile = True
+        infile = args.files[0]
+        sid = args.start_i
+        all_items = range(args.start_i, min(args.end_i, reader.nstars(args.files[0])))
+    else:
+        singlefile = False
+        infile = args.files[args.start_i]
+        sid = 0
+        all_items = args.files[args.start_i:args.end_i]
     items = copy(all_items)
     n_items = len(items)
-
-    ## Check if we're dealing with a single input file with many stars
-    if n_items == 1 and SPLOXReader.can_read(items[0]):
-        multifile = True
-    else:
-        multifile = False
-        
 
     if mpi_rank == 0:
         if (not with_mpi) or (mpi_size==1):
@@ -226,9 +224,18 @@ if __name__ == '__main__':
     ## Without MPI or running with a single node
     ## =========================================
     if (not with_mpi) or (mpi_size==1):
-        for infile in args.files[args.start_i:args.end_i]:
-            detrend(infile)
+        for item in items:
+            if singlefile:
+                sid = item
+            else:
+                infile = item
+                if not exists(infile):
+                    logger.warning("The input file {:s} doesn't exists, skipping the file".format(infile))
+                    continue
 
+            dataset = reader.read(infile, sid, type=args.flux_type)
+            detrend(dataset)
+                                
     ## With MPI
     ## ========
     else:
@@ -243,7 +250,21 @@ if __name__ == '__main__':
                 ## Send an item
                 while items and free_workers:
                     w = free_workers.pop()
-                    comm.send(items.pop(), dest=w, tag=0)
+
+                    item = items.pop()
+
+                    if singlefile:
+                        sid = item
+                        logger.info("Processing star %i", sid)
+                    else:
+                        infile = item
+                        logger.info("Processing file %s",abspath(infile))
+                        if not exists(infile):
+                            logger.warning("The input file {:s} doesn't exists, skipping the file".format(infile))
+                            continue
+                        
+                    dataset = reader.read(infile, sid, type=ftype)
+                    comm.send(dataset, dest=w, tag=0)
                     active_workers.append(w)
 
                 ## Receive the results
@@ -260,8 +281,6 @@ if __name__ == '__main__':
                             logfile_w.close()
                         logger.info("Finished {:3d} of {:3d} light curves".format(n_finished_items,n_items))
 
-                sleep(0.25)
-
             for w in free_workers:
                 comm.send(-1, dest=w, tag=0)
 
@@ -269,11 +288,11 @@ if __name__ == '__main__':
         ## -----------
         else:
             while True:
-                infile = comm.recv(source=mpi_root, tag=0)
+                dataset = comm.recv(source=mpi_root, tag=0)
                 if infile == -1:
                     break
-                detrend(infile, args.flux_type)
-                comm.send(infile, dest=mpi_root, tag=2)    
+                detrend(dataset, args.flux_type)
+                comm.send(dataset.epic, dest=mpi_root, tag=2)    
 
 
         
