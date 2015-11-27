@@ -216,9 +216,15 @@ class DtData(object):
         self.outlier_mask = ones(self.flux.size, np.bool)
         self.mask  =  self.quality_mask & self.outlier_mask
         self.npt = self.flux.size
-        self._fm, self._fs =  medsig(asarray(self.flux[self.mask]))
+        self._fm, self._fs =  medsig(self.flux[self.mask])
 
+        assert self.flux.ndim == 1, 'The flux array for DtData should be 1D [npt]'
+        assert self.inputs.ndim == 2, 'The input array for DtData should be 2D [npt,3]'
+        assert self.inputs.shape[1] == 3, 'The input array for DtData should be 2D with the shape [npt,3]'
+        assert self.quality_mask.ndim == 1, 'The mask array for DtData should be 1D [npt]'
+        ##TODO: Change the input array axes from [npt,3] to [3,npt]
 
+        
     def create_training_set(self, nrandom=100, nblocks=5, bspan=50):
         """Creates a new DtData instance containing a subset of the original data.
         """
