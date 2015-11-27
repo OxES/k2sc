@@ -49,7 +49,7 @@ warnings.filterwarnings('ignore', category=DeprecationWarning, append=True)
 mpi_root = 0
 logging.basicConfig(level=logging.DEBUG, format='%(levelname)s %(name)s: %(message)s')
 
-def detrend(dataset, ftype):
+def detrend(dataset):
     logger  = logging.getLogger('Worker %i'%mpi_rank)
     logfile = open('{:s}.{:03d}'.format(args.logfile, mpi_rank), mode='w')
     fh = logging.StreamHandler(logfile)
@@ -194,11 +194,11 @@ if __name__ == '__main__':
         exit()
                 
     ## Check if we're dealing with a single input file with many stars
-    if len(args.files) == 1 and isinstance(reader, SPLOXReader):
+    if len(args.files) == 1 and issubclass(reader, SPLOXReader):
         singlefile = True
         infile = args.files[0]
         sid = args.start_i
-        all_items = range(args.start_i, min(args.end_i, reader.nstars(args.files[0])))
+        all_items = range(args.start_i, min(args.end_i or 1e8, reader.nstars(args.files[0])))
     else:
         singlefile = False
         infile = args.files[args.start_i]
