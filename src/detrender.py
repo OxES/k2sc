@@ -216,7 +216,7 @@ class DtData(object):
         self.outlier_mask = ones(self.flux.size, np.bool)
         self.mask  =  self.quality_mask & self.outlier_mask
         self.npt = self.flux.size
-        self._fm, self._fs =  medsig(asarray(self.flux[self.mask]))
+        self._fm, self._fs =  medsig(asarray(self.flux[:,self.mask.flatten()]))
 
 
     def create_training_set(self, nrandom=100, nblocks=5, bspan=50):
@@ -226,9 +226,8 @@ class DtData(object):
         ids = np.sort(concatenate([ids, permutation(delete(arange(self.npt),ids))[:nrandom]]))
         tr_mask = zeros(self.npt, np.bool)
         tr_mask[ids] = 1
-        tr_mask = tr_mask & self.mask
-
-        trd = DtData(self.unmasked_flux[tr_mask], self.unmasked_inputs[tr_mask,:])
+        tr_mask = (tr_mask & self.mask).flatten()
+        trd = DtData(self.unmasked_flux[:,tr_mask], self.unmasked_inputs[tr_mask,:])
         trd._fm, trd._fs = self._fm, self._fs
         return trd
 
@@ -255,7 +254,7 @@ class DtData(object):
 
     @property
     def masked_normalised_flux(self):
-        return self.flux[self.mask] / self._fm - 1.
+        return self.flux[:,self.mask.flatten()] / self._fm - 1.
 
     @property
     def unmasked_normalised_flux(self):
