@@ -111,7 +111,7 @@ def detrend(dataset, ftype):
             logger.error('Local optimiser failed, %s', e)
             logger.error('Skipping the file')
             return
-        logger.info('Local minimun found at: %s', np.array_str(pv, precision=3))
+        logger.info('Local minimum found at: %s', np.array_str(pv, precision=3))
 
         logger.info('Masking outliers')
         detrender.mask_outliers(pv=pv)

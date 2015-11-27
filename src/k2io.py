@@ -112,13 +112,13 @@ class smearReader(DataReader):
     def read(cls, fname):
         epic = 200000000
         data = pf.getdata(fname, 1)
-        head = pf.getheader(fname, 0)
+        head = pf.PrimaryHDU().header#pf.getheader(fname, 0)
         return K2Data(epic,
                       time=data['BJD'],
                       cadence=data['CAD'],
                       quality=data['QUALITY'],
-                      fluxes=data['FLUX'],
-                      errors=data['FLUX_ERR'],
+                      fluxes=data['SAP_FLUX'],
+                      errors=data['SAP_FLUX_ERR'],
                       x=data['POS_CORR1'],
                       y=data['POS_CORR2'],
                       sap_header=head)    
