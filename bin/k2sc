@@ -233,8 +233,8 @@ if __name__ == '__main__':
                 if not exists(infile):
                     logger.warning("The input file {:s} doesn't exists, skipping the file".format(infile))
                     continue
-            logger.info('Reader setup: %s %s %s ',infile, sid,args.flux_type)
-            
+            logger.info('Reader setup: %s %s %s %s ',reader,infile, sid,args.flux_type)
+
             dataset = reader.read(infile, sid, type=args.flux_type)
             detrend(dataset)
                                 

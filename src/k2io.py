@@ -78,7 +78,7 @@ class MASTReader(DataReader):
     allowed_types = ['sap', 'pdc']
 
     @classmethod
-    def read(cls, fname, **kwargs):
+    def read(cls, fname, sid, **kwargs):
         ftype = 'sap_flux' if kwargs.get('type','sap').lower() == 'sap' else 'pdcsap_flux'
         epic = int(re.findall('ktwo([0-9]+)-c', basename(fname))[0])
         data = pf.getdata(fname, 1)
