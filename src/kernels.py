@@ -29,13 +29,14 @@ class UniformPrior(Prior):
 
 
 class LogNormPrior(Prior):
-    def __init__(self, mu, sigma):
+    def __init__(self, mu, sigma, lims=None):
         self.mu = mu
         self.sigma = sigma
         self.C = -m.log(sigma*m.sqrt(2*pi))
+        self.lims = lims if lims is not None else [0,inf]
 
     def logpdf(self, x):
-        if x <= 0:
+        if (x <= self.lims[0]) or (x > self.lims[1]):
             return -inf
         mu, sigma  = self.mu, self.sigma
         lnx = m.log(x)
@@ -86,7 +87,7 @@ class BasicKernel(DtKernel):
     ndim  = 3
     npar  = 6
     priors = [UniformPrior(0,10),
-              LogNormPrior(8, 2),
+              LogNormPrior(8, 2, lims=[0.5,inf]),
               UniformPrior(0,10),
               UniformPrior(1e-4,10),
               UniformPrior(1e-4,10),
@@ -103,12 +104,12 @@ class BasicKernel(DtKernel):
 class BasicKernelInvScale(DtKernel):
     name  = "BasicKernelInvScale"
     eq    = 'At*ESK(1/St) + Ap*ESK(1/Sx)*ESK(1/Sy)'
-    names = 'time_amplitude time_scale xy_amplitude x_iscale y_iscale white_noise '.split()
+    names = 'time_amplitude time_iscale xy_amplitude x_iscale y_iscale white_noise '.split()
     pv0   = array([1, 0.25, 1, 4, 4, 0.01])
     ndim  = 3
     npar  = 6
     priors = [UniformPrior(0,10),
-              LogNormPrior(0.25, 1.25),
+              LogNormPrior(0.25, 1.25, lims=[0,2]),
               UniformPrior(0,10),
               LogNormPrior(6, 1),
               LogNormPrior(6, 1),
@@ -156,6 +157,37 @@ class PeriodicKernel(DtKernel):
         self._k   = self._k1 + self._k2
 
 
+# class QuasiPeriodicKernel(BasicKernel):
+#     name  = 'QuasiPeriodicKernel'
+#     names = 'time_amplitude time_scale time_period time_evolution xy_amplitude x_scale y_scale white_noise '.split()
+#     pv0   = array([1, 0.25, 10, 100, 1, 0.25, 0.25, 0.01])
+#     ndim  = 3
+#     npar  = 8
+
+#     priors = [UniformPrior(0,10),    ## Time amplitude
+#               LogNormPrior(8, 2, lims=[0.5,inf]),    ## Time scale
+#               UniformPrior(0,20),    ## Period
+#               UniformPrior(0,500),   ## Evolution
+#               UniformPrior(0,10),    ## XY amplitude
+#               UniformPrior(1e-4,10), ## X scale
+#               UniformPrior(1e-4,10), ## Y scale
+#               UniformPrior(0,10)]    ## White noise
+
+#     bounds = [[0,2],[0.1,10],[0,20],[0,500],[0,2],[1e-2,3],[1e-2,3],[0.01,1]]
+
+#     def __init__(self, p0=None, period=5, evolution_scale=100):
+#         super(QuasiPeriodicKernel, self).__init__(p0)
+#         self._pv[2] = period
+#         self._pv[3] = evolution_scale
+#         self.set_pv(self._pv)
+
+#     def _define_kernel(self):
+#         pv = self._pv
+#         self._k1 = pv[0] * ESn2K(1./pv[1], pv[2], ndim=3, dim=0) * ESK(pv[3], ndim=3, dim=0)
+#         self._k2 = pv[4] * ESK(pv[5], ndim=3, dim=1) * ESK(pv[6], ndim=3, dim=2)
+#         self._k  = self._k1 + self._k2
+
+
 class QuasiPeriodicKernel(BasicKernel):
     name  = 'QuasiPeriodicKernel'
     names = 'time_amplitude time_scale time_period time_evolution xy_amplitude x_scale y_scale white_noise '.split()
@@ -163,13 +195,13 @@ class QuasiPeriodicKernel(BasicKernel):
     ndim  = 3
     npar  = 8
 
-    priors = [UniformPrior(0,10),    ## Time amplitude
-              LogNormPrior(8, 2),    ## Time scale
-              UniformPrior(0,20),    ## Period
+    priors = [UniformPrior(0, 5),    ## Time amplitude
+              LogNormPrior(0.25, 1.25, lims=[0,2]),    ## Inverse time scale
+              UniformPrior(0,25),    ## Period
               UniformPrior(0,500),   ## Evolution
-              UniformPrior(0,10),    ## XY amplitude
-              UniformPrior(1e-4,10), ## X scale
-              UniformPrior(1e-4,10), ## Y scale
+              UniformPrior(0, 5),    ## XY amplitude
+              LogNormPrior(6, 1),    ## inverse X scale
+              LogNormPrior(6, 1),    ## inverse Y scale
               UniformPrior(0,10)]    ## White noise
 
     bounds = [[0,2],[0.1,10],[0,20],[0,500],[0,2],[1e-2,3],[1e-2,3],[0.01,1]]
@@ -182,6 +214,6 @@ class QuasiPeriodicKernel(BasicKernel):
 
     def _define_kernel(self):
         pv = self._pv
-        self._k1 = pv[0] * ESn2K(1./pv[1], pv[2], ndim=3, dim=0) * ESK(pv[3], ndim=3, dim=0)
-        self._k2 = pv[4] * ESK(pv[5], ndim=3, dim=1) * ESK(pv[6], ndim=3, dim=2)
+        self._k1 = pv[0] * ESn2K(pv[1], pv[2], ndim=3, dim=0) * ESK(pv[3], ndim=3, dim=0)
+        self._k2 = pv[4] * ESK(1./pv[5], ndim=3, dim=1) * ESK(1./pv[6], ndim=3, dim=2)
         self._k  = self._k1 + self._k2
