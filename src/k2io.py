@@ -103,35 +103,35 @@ class MASTReader(DataReader):
             fmt_ok = 'SAP_FLUX' in h.values()
             return fmt_ok
         
-class smearReader(DataReader):
-    extensions = ['.fits', '.csv']
-    ndatasets = 1
-    fn_out_template = 'hr1185.fits'
+# class smearReader(DataReader):
+#     extensions = ['.fits', '.csv']
+#     ndatasets = 1
+#     fn_out_template = 'hr1185.fits'
 
-    @classmethod
-    def read(cls, fname):
-        epic = 200000000
-        data = pf.getdata(fname, 1)
-        head = pf.PrimaryHDU().header#pf.getheader(fname, 0)
-        return K2Data(epic,
-                      time=data['BJD'],
-                      cadence=data['CAD'],
-                      quality=data['QUALITY'],
-                      fluxes=data['SAP_FLUX'],
-                      errors=data['SAP_FLUX_ERR'],
-                      x=data['POS_CORR1'],
-                      y=data['POS_CORR2'],
-                      sap_header=head)    
+#     @classmethod
+#     def read(cls, fname):
+#         epic = 200000000
+#         data = pf.getdata(fname, 1)
+#         head = pf.PrimaryHDU().header#pf.getheader(fname, 0)
+#         return K2Data(epic,
+#                       time=data['BJD'],
+#                       cadence=data['CAD'],
+#                       quality=data['QUALITY'],
+#                       fluxes=data['SAP_FLUX'],
+#                       errors=data['SAP_FLUX_ERR'],
+#                       x=data['POS_CORR1'],
+#                       y=data['POS_CORR2'],
+#                       sap_header=head)    
     
-    @classmethod
-    def can_read(cls, fname):
-        ext_ok = cls.is_extension_valid(fname)
-        if not ext_ok:
-            return False
-        else:
-            h = pf.getheader(fname, 1)
-            fmt_ok = 'BJD' in h.values()
-            return fmt_ok
+#     @classmethod
+#     def can_read(cls, fname):
+#         ext_ok = cls.is_extension_valid(fname)
+#         if not ext_ok:
+#             return False
+#         else:
+#             h = pf.getheader(fname, 1)
+#             fmt_ok = 'BJD' in h.values()
+#             return fmt_ok
         
 
 class SPLOXReader(DataReader):
@@ -237,7 +237,7 @@ class FITSWriter(object):
         print 'Saved to', fname
 
 
-readers = [AMCReader,MASTReader,SPLOXReader,smearReader]
+readers = [AMCReader,MASTReader,SPLOXReader]
 
 def select_reader(fname):
     for R in readers:

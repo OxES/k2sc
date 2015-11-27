@@ -189,6 +189,7 @@ if __name__ == '__main__':
     ## Select data reader
     ## NOTE: We don't allow mixed input types per run
     reader = select_reader(args.files[0])
+
     if reader is None:
         logger.critical("Unrecognized input file type for file {:s}".format(args.files[0]))
         exit()
@@ -232,7 +233,8 @@ if __name__ == '__main__':
                 if not exists(infile):
                     logger.warning("The input file {:s} doesn't exists, skipping the file".format(infile))
                     continue
-
+            logger.info('Reader setup: %s %s %s ',infile, sid,args.flux_type)
+            
             dataset = reader.read(infile, sid, type=args.flux_type)
             detrend(dataset)
                                 
@@ -262,7 +264,6 @@ if __name__ == '__main__':
                         if not exists(infile):
                             logger.warning("The input file {:s} doesn't exists, skipping the file".format(infile))
                             continue
-                        
                     dataset = reader.read(infile, sid, type=args.flux_type)
                     comm.send(dataset, dest=w, tag=0)
                     active_workers.append(w)
@@ -292,7 +293,7 @@ if __name__ == '__main__':
                 if infile == -1:
                     break
                 detrend(dataset, args.flux_type)
-                comm.send(dataset.epic, dest=mpi_root, tag=2)    
+                comm.send(dataset.epic, dest=mpi_root, tag=2)   
 
 
         
