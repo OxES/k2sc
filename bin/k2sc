@@ -263,7 +263,7 @@ if __name__ == '__main__':
                             logger.warning("The input file {:s} doesn't exists, skipping the file".format(infile))
                             continue
                         
-                    dataset = reader.read(infile, sid, type=ftype)
+                    dataset = reader.read(infile, sid, type=args.flux_type)
                     comm.send(dataset, dest=w, tag=0)
                     active_workers.append(w)
 
