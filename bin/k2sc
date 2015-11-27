@@ -291,7 +291,7 @@ if __name__ == '__main__':
                 dataset = comm.recv(source=mpi_root, tag=0)
                 if infile == -1:
                     break
-                detrend(dataset, args.flux_type)
+                detrend(dataset)
                 comm.send(dataset.epic, dest=mpi_root, tag=2)    
 
 
