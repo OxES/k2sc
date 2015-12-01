@@ -74,7 +74,7 @@ class AMCReader(DataReader):
 class MASTReader(DataReader):
     extensions = ['.fits', '.fit']
     ndatasets = 1
-    fn_out_template = 'EPIC_{:9d}_sap.fits'
+    fn_out_template = 'EPIC_{:9d}_mast.fits'
     allowed_types = ['sap', 'pdc']
 
     @classmethod
