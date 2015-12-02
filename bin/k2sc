@@ -25,7 +25,7 @@ except ImportError:
 from copy import copy   
 from collections import namedtuple
 from matplotlib.backends.backend_pdf import PdfPages
-from numpy import any, array, ones_like, fromstring
+from numpy import any, array, ones_like, fromstring, tile, median
 from numpy.random import normal
 
 from time import time, sleep
@@ -50,59 +50,80 @@ mpi_root = 0
 logging.basicConfig(level=logging.DEBUG, format='%(levelname)s %(name)s: %(message)s')
 
 def detrend(dataset):
+    ## Setup the logger
+    ## ----------------
     logger  = logging.getLogger('Worker %i'%mpi_rank)
     logfile = open('{:s}.{:03d}'.format(args.logfile, mpi_rank), mode='w')
     fh = logging.StreamHandler(logfile)
     fh.setFormatter(logging.Formatter('%(levelname)s %(name)s: %(message)s'))
     fh.setLevel(logging.DEBUG)
     logger.addHandler(fh)
-
     fpath_out = join(args.save_dir, reader.fn_out_template.format(dataset.epic))
-
     logger.name = 'Worker {:d} <{:d}>'.format(mpi_rank, dataset.epic)
 
-    dataset.mask_flares(args.flare_sigma, args.flare_erosion)
-    #dataset.mask_outliers(args.outlier_sigma, args.outlier_mwidth) # Screws up the rapidly pulsating stars
+    ## Initialise utility variables
+    ## ----------------------------
+    ds = dataset
+    info = logger.info
+    
+    ## Outlier detection and masking
+    ## -----------------------------
+    ## We try to identify strong flares and deep transi-like events that would
+    ## mess up the Lomb-Scargle period detection. However, in some cases the
+    ## outlier detection will fail (rapidly varying stars), and we need to use
+    ## only the mask based on the quality flags.
+    ## --------------------------------------------------------------------------
+    ds.mask_flares(args.flare_sigma, args.flare_erosion)
+    ds.mask_outliers(args.outlier_sigma, args.outlier_mwidth)
+    r_outliers_u = (~ds.omasks_u).sum(1) / ds.omasks_u.shape[1]
+    r_outliers_d = (~ds.omasks_d).sum(1) / ds.omasks_d.shape[1]
+    if any(r_outliers_u+r_outliers_d > 0.25): 
+        ds.initialize_masks()
+        ds.mask_flares(args.flare_sigma, args.flare_erosion)
 
-    logger.info('Starting Lomb-Scargle period search')
-    dataset.search_for_periodicity(args.ls_min_period, args.ls_max_period)
+    ## Lomb-Scargle period search
+    ## --------------------------
+    info('Starting Lomb-Scargle period search')
+    ds.search_for_periodicity(args.ls_min_period, args.ls_max_period, args.ls_min_power)
 
-    if dataset.is_periodic:
-        kernel = QuasiPeriodicKernel(period=dataset.ls_period)
-        logger.info('Found periodicity p = {:7.2f} (power {:7.2f} > {:7.2f})'.format(dataset.ls_period, dataset.ls_power, args.ls_min_power))
+    ## Automatic kernel selection
+    ## --------------------------
+    if ds.is_periodic:
+        kernel = QuasiPeriodicKernel(period=ds.ls_period)
+        info('Found periodicity p = {:7.2f} (power {:7.2f} > {:7.2f})'.format(ds.ls_period, ds.ls_power, args.ls_min_power))
     else:
         kernel = BasicKernelInvScale()
-        logger.info('No strong periodicity found: using an aperiodic kernel')
+        info('No strong periodicity found: using an aperiodic kernel')
 
-
-    Result = namedtuple('SCResult', 'detrender pv tr_time tr_position cdpp_r cdpp_c warn')
+    ## Detrending
+    ## ----------
+    Result = namedtuple('SCResult', 'detrender pv tr_time tr_position cdpp_r cdpp_t cdpp_c warn')
     results = []
-    for iset in range(dataset.nsets):
+    for iset in range(ds.nsets):
         np.random.seed(args.seed)
         tstart = time()
-        inputs = np.transpose([dataset.time,dataset.x,dataset.y])
-        detrender = Detrender(dataset.fluxes[iset], inputs, mask=dataset.masks[iset],
+        inputs = np.transpose([ds.time,ds.x,ds.y])
+        detrender = Detrender(ds.fluxes[iset], inputs, mask=ds.masks[iset],
                               splits=splits, kernel=kernel, tr_nrandom=args.tr_nrandom,
                               tr_nblocks=args.tr_nblocks, tr_bspan=args.tr_bspan)
         de = DiffEvol(detrender.neglnposterior, kernel.bounds, args.de_npop)
 
         if isinstance(kernel, QuasiPeriodicKernel):
-            de._population[:,2] = np.clip(normal(dataset.ls_period, 0.1*dataset.ls_period, size=de.n_pop),
+            de._population[:,2] = np.clip(normal(ds.ls_period, 0.1*ds.ls_period, size=de.n_pop),
                                           args.ls_min_period, args.ls_max_period)
 
-
-        logger.info('Starting global hyperparameter optimisation using DE')
+        info('Starting global hyperparameter optimisation using DE')
         tstart_de = time()
         for i,r in enumerate(de(args.de_niter)):
-            logger.info('DE iteration %3i -ln(L) %4.1f', i, de.minimum_value)
+            info('DE iteration %3i -ln(L) %4.1f', i, de.minimum_value)
             tcur_de = time()
             if ((de._fitness.ptp() < 3) or (tcur_de - tstart_de > args.de_max_time)) and (i>2):
                 break
-        logger.info('DE finished in %i seconds', tcur_de-tstart_de)
-        logger.info('DE minimum found at: %s', np.array_str(de.minimum_location, precision=3, max_line_width=250))
-        logger.info('DE -ln(L) %4.1f', de.minimum_value)
+        info('DE finished in %i seconds', tcur_de-tstart_de)
+        info('DE minimum found at: %s', np.array_str(de.minimum_location, precision=3, max_line_width=250))
+        info('DE -ln(L) %4.1f', de.minimum_value)
 
-        logger.info('Starting local hyperparameter optimisation')
+        info('Starting local hyperparameter optimisation')
         try:
             with warnings.catch_warnings():
                 warnings.filterwarnings('ignore', category=RuntimeWarning, append=True)
@@ -111,21 +132,28 @@ def detrend(dataset):
             logger.error('Local optimiser failed, %s', e)
             logger.error('Skipping the file')
             return
-        logger.info('Local minimum found at: %s', np.array_str(pv, precision=3))
+        info('Local minimum found at: %s', np.array_str(pv, precision=3))
 
-        logger.info('Masking outliers')
+        info('Masking outliers')
         detrender.mask_outliers(pv=pv)
-        logger.info('Computing time and position trends')
+        info('Computing time and position trends')
         tr_time,tr_position = detrender.predict(pv, components=True)
-        cdpp_r = cdpp(detrender.data.masked_time, detrender.data.masked_flux)
-        cdpp_c = cdpp(detrender.data.unmasked_time, detrender.data.unmasked_flux-tr_time-tr_position, exclude=~detrender.data.mask)
-        results.append(Result(detrender, pv, tr_time, tr_position, cdpp_r, cdpp_c, warn))
-        logger.info('Raw CDPP %6.3f', cdpp_r)
-        logger.info('Detrended CDPP %6.3f', cdpp_c)
-        logger.info('Detrending time %6.3f', time()-tstart)
+        cdpp_r = cdpp(detrender.data.masked_time,
+                      detrender.data.masked_flux)
+        cdpp_t = cdpp(detrender.data.unmasked_time,
+                      detrender.data.unmasked_flux-tr_position + np.median(tr_position),
+                      exclude=~detrender.data.mask)
+        cdpp_c = cdpp(detrender.data.unmasked_time,
+                      detrender.data.unmasked_flux-tr_time-tr_position+median(tr_time)+median(tr_position),
+                      exclude=~detrender.data.mask)
+        results.append(Result(detrender, pv, tr_time, tr_position, cdpp_r, cdpp_t, cdpp_c, warn))
+        info('CDPP - raw - %6.3f', cdpp_r)
+        info('CDPP - position component removed - %6.3f', cdpp_t)
+        info('CDPP - full reduction - %6.3f', cdpp_c)
+        info('Detrending time %6.3f', time()-tstart)
 
-    FITSWriter.write(fpath_out, splits, dataset, results)
-    logger.info('Finished')
+    FITSWriter.write(fpath_out, splits, ds, results)
+    info('Finished')
     fh.flush()
     logger.removeHandler(fh)
     fh.close()
@@ -160,8 +188,8 @@ if __name__ == '__main__':
     gps.add_argument('--ls-max-period', default=20, type=float, help='Maximum period to search for')
     gfd.add_argument('--flare-sigma', default=5, type=float)
     gfd.add_argument('--flare-erosion', default=5, type=int)
-    god.add_argument('--outlier-sigma', default=10, type=float)
-    god.add_argument('--outlier-mwidth', default=5, type=int)
+    god.add_argument('--outlier-sigma', default=5, type=float)
+    god.add_argument('--outlier-mwidth', default=25, type=int)
     args = ap.parse_args()
 
     csplits = {4: [2240,2273]}
