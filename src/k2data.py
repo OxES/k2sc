@@ -71,17 +71,22 @@ class K2Data(object):
         self.nsets   = self.fluxes.shape[0]
         self.npoints = self.fluxes.shape[1]
 
-        self.kmask    = all(isfinite(self.fluxes),0) & (self.quality==0)
-        self.fmasks   = ones([self.nsets, self.npoints], np.bool)
-        self.omasks_u = ones_like(self.fmasks)
-        self.omasks_d = ones_like(self.fmasks)
-        self.masks    = tile(self.kmask, [self.nsets,1])
+        self.initialize_masks()
         
         self.is_periodic = False
         self.ls_period = None
         self.ls_power = None
 
 
+    def initialize_masks(self):
+        self.qmask    = all(isfinite(self.fluxes),0) & (self.quality==0)
+        self.fmasks   = ones([self.nsets, self.npoints], np.bool)
+        self.tmasks   = ones([self.nsets, self.npoints], np.bool)
+        self.omasks_u = ones_like(self.fmasks)
+        self.omasks_d = ones_like(self.fmasks)
+        self.masks    = tile(self.qmask, [self.nsets,1])
+
+        
     def mask_flares(self, flare_sigma=5, flare_erosion=5):
         """Identify and mask flares.
         
@@ -111,10 +116,8 @@ class K2Data(object):
             r = flux - medfilt(flux, outlier_mwidth)
             fmed,fstd = medsig(flux[mask])
             rmed,rstd = medsig(r[mask])
-            self.omasks_u[iset,:] = r < outlier_sigma*rstd
-            self.omasks_u[iset,:] = self.omasks_u[iset,:] | ~self.fmasks[iset,:]
-            self.omasks_d[iset,:] = (1. + fmed) > 0.75
-            self.omasks_d[iset,:] = self.omasks_d[iset,:] | ~self.fmasks[iset,:]
+            self.omasks_u[iset,mask] = r[mask] <  outlier_sigma*rstd
+            self.omasks_d[iset,mask] = r[mask] > -outlier_sigma*rstd
         self._update_mask()
 
 
@@ -145,4 +148,4 @@ class K2Data(object):
 
 
     def _update_mask(self):
-        self.masks = self.kmask & self.fmasks & self.omasks_u & self.omasks_d
+        self.masks = self.qmask & self.fmasks & self.omasks_u & self.omasks_d

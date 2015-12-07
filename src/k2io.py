@@ -74,7 +74,7 @@ class AMCReader(DataReader):
 class MASTReader(DataReader):
     extensions = ['.fits', '.fit']
     ndatasets = 1
-    fn_out_template = 'EPIC_{:9d}_sap.fits'
+    fn_out_template = 'EPIC_{:9d}_mast.fits'
     allowed_types = ['sap', 'pdc']
 
     @classmethod
@@ -137,7 +137,7 @@ class MASTReader(DataReader):
 class SPLOXReader(DataReader):
     extensions = ['.fits', '.fit']
     ndatasets = 6
-    fn_out_template = 'EPIC_{:9d}_reb.fits'
+    fn_out_template = 'STAR_{:09d}.fits'
     _cache = None
     _nstars = None
     
@@ -196,23 +196,28 @@ class FITSWriter(object):
             aup[data.nanmask] = arr
             return arr
 
-        columns = [pf.Column(name='time',     format='D', array=unpack(data.time)),
-                   pf.Column(name='cadence',  format='I', array=unpack(data.cadence)),
-                   pf.Column(name='quality',  format='I', array=unpack(data.quality)),
-                   pf.Column(name='x',        format='D', array=unpack(data.x)),
-                   pf.Column(name='y',        format='D', array=unpack(data.y))]
+        C = pf.Column
+        
+        cols = [C(name='time',     format='D', array=unpack(data.time)),
+                C(name='cadence',  format='I', array=unpack(data.cadence)),
+                C(name='quality',  format='I', array=unpack(data.quality)),
+                C(name='x',        format='D', array=unpack(data.x)),
+                C(name='y',        format='D', array=unpack(data.y))]
 
         for i in range(data.nsets):
-            columns.extend([pf.Column(name='flux_%d'    %(i+1), format='D', array=unpack(data.fluxes[i])),
-                            pf.Column(name='error_%d'   %(i+1), format='D', array=unpack(data.errors[i])),
-                            pf.Column(name='mask_ol_%d' %(i+1), format='D', array=unpack(dtres[i].detrender.data.outlier_mask)),
-                            pf.Column(name='trend_t_%d' %(i+1), format='D', array=unpack(dtres[i].tr_time)),
-                            pf.Column(name='trend_p_%d' %(i+1), format='D', array=unpack(dtres[i].tr_position))])
+            cols.extend([C(name='flux_%d'    %(i+1), format='D', array=unpack(data.fluxes[i])),
+                         C(name='error_%d'   %(i+1), format='D', array=unpack(data.errors[i])),
+                         C(name='mask_ou_%d' %(i+1), format='D', array=unpack(data.omasks_u[i])),
+                         C(name='mask_od_%d' %(i+1), format='D', array=unpack(data.omasks_d[i])),
+                         C(name='mask_fl_%d' %(i+1), format='D', array=unpack(data.fmasks[i])),
+                         C(name='mask_ol_%d' %(i+1), format='D', array=unpack(dtres[i].detrender.data.outlier_mask)),
+                         C(name='trend_t_%d' %(i+1), format='D', array=unpack(dtres[i].tr_time)),
+                         C(name='trend_p_%d' %(i+1), format='D', array=unpack(dtres[i].tr_position))])
 
         if pf_version >= 3.3:
-            hdu = pf.BinTableHDU.from_columns(pf.ColDefs(columns))
+            hdu = pf.BinTableHDU.from_columns(pf.ColDefs(cols))
         else:
-            hdu = pf.new_table(columns)
+            hdu = pf.new_table(cols)
 
         hdu.header['extname'] = 'k2_detrend'
         hdu.header['object'] = data.epic
@@ -220,6 +225,7 @@ class FITSWriter(object):
         hdu.header['splits'] = str(splits)
         for i in range(data.nsets):
             hdu.header['cdpp%dr'%(i+1)] = dtres[i].cdpp_r
+            hdu.header['cdpp%dt'%(i+1)] = dtres[i].cdpp_t
             hdu.header['cdpp%dc'%(i+1)] = dtres[i].cdpp_c
             hdu.header['ap%d_warn'%(i+1)] = dtres[i].warn
         hdu.header['ker_name'] = dtres[0].detrender.kernel.name
