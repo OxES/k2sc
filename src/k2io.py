@@ -137,7 +137,7 @@ class smearReader(DataReader):
 class SPLOXReader(DataReader):
     extensions = ['.fits', '.fit']
     ndatasets = 6
-    fn_out_template = 'EPIC_{:9d}_reb.fits'
+    fn_out_template = 'STAR_{:09d}.fits'
     _cache = None
     _nstars = None
     
