@@ -4,8 +4,7 @@ from numpy import array, asarray, s_, log, pi, inf
 
 from george.kernels import ExpSquaredKernel as ESK
 from george.kernels import ExpSine2Kernel as ESn2K
-
-##TODO: Add priors
+from george.kernels import ExpKernel as EK
 
 class Prior(object):
     def __init__(self):
@@ -18,7 +17,7 @@ class UniformPrior(Prior):
     def __init__(self, a, b):
         self.a = a
         self.b = b
-        self.C = 1./(b-1)
+        self.C = 1./(b-a)
         self.lnC = m.log(self.C)
 
     def logpdf(self, x):
