@@ -34,7 +34,7 @@ from os.path import join, exists, abspath, basename
 from argparse import ArgumentParser
 
 from k2sc.detrender import Detrender
-from k2sc.kernels import BasicKernel, BasicKernelInvScale, QuasiPeriodicKernel
+from k2sc.kernels import kernels, BasicKernel, QuasiPeriodicKernel
 from k2sc.k2io import select_reader, FITSWriter, SPLOXReader
 from k2sc.cdpp import cdpp
 from k2sc.de import DiffEvol
@@ -86,14 +86,21 @@ def detrend(dataset):
     info('Starting Lomb-Scargle period search')
     ds.search_for_periodicity(args.ls_min_period, args.ls_max_period, args.ls_min_power)
 
-    ## Automatic kernel selection
-    ## --------------------------
-    if ds.is_periodic:
-        kernel = QuasiPeriodicKernel(period=ds.ls_period)
-        info('Found periodicity p = {:7.2f} (power {:7.2f} > {:7.2f})'.format(ds.ls_period, ds.ls_power, args.ls_min_power))
+    ## Kernel selection
+    ## ----------------
+    if args.kernel:
+        info('Overriding automatic kernel selection, using %s kernel as given in the command line', args.kernel)
+        if 'periodic' in args.kernel and not args.kernel_period:
+            logger.critical('Need to give period (--kernel-period) if overriding automatic kernel detection with a periodic kernel. Quitting.')
+            exit(1)
+        kernel = kernels[args.kernel](period=args.kernel_period)
     else:
-        kernel = BasicKernelInvScale()
-        info('No strong periodicity found: using an aperiodic kernel')
+        if ds.is_periodic:
+            info('Found periodicity p = {:7.2f} (power {:7.2f} > {:7.2f}), using a quasiperiodic kernel'.format(ds.ls_period, ds.ls_power, args.ls_min_power))
+            kernel = QuasiPeriodicKernel(period=ds.ls_period)
+        else:
+            info('No strong periodicity found, using a basic kernel')
+            kernel = BasicKernel()
 
     ## Detrending
     ## ----------
@@ -109,7 +116,7 @@ def detrend(dataset):
         de = DiffEvol(detrender.neglnposterior, kernel.bounds, args.de_npop)
 
         if isinstance(kernel, QuasiPeriodicKernel):
-            de._population[:,2] = np.clip(normal(ds.ls_period, 0.1*ds.ls_period, size=de.n_pop),
+            de._population[:,2] = np.clip(normal(kernel.period, 0.1*kernel.period, size=de.n_pop),
                                           args.ls_min_period, args.ls_max_period)
 
         info('Starting global hyperparameter optimisation using DE')
@@ -177,6 +184,8 @@ if __name__ == '__main__':
     ap.add_argument('--seed', default=0, type=int)
     ap.add_argument('--logfile', default='', type=str)
     ap.add_argument('--flux-type', default='sap', type=str)
+    ap.add_argument('--kernel', choices=kernels.keys(), default=None)
+    ap.add_argument('--kernel-period', type=float, default=None)
     gts.add_argument('--tr-nrandom', default=300, type=int, help='Number of random samples')
     gts.add_argument('--tr-nblocks', default=6, type=int, help='Number of sample blocks')
     gts.add_argument('--tr-bspan', default=50, type=int, help='Span of a single block')
@@ -193,7 +202,7 @@ if __name__ == '__main__':
     args = ap.parse_args()
 
     csplits = {4: [2240,2273]}
-    
+
     ## Logging
     ##
     if mpi_rank == 0:
