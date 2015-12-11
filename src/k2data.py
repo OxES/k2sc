@@ -103,7 +103,7 @@ class K2Data(object):
         self._update_mask()
 
 
-    def mask_outliers(self, outlier_sigma=10, outlier_mwidth=5):
+    def mask_outliers(self, outlier_sigma=5, outlier_mwidth=5):
         """Identify short-duration outliers.
 
         Parameters
