@@ -43,7 +43,7 @@ class GeorgeGP(object):
         self.set_pv(pv)
         self.set_inputs(x)
         if self.is_dirty:
-            self._gp.compute(self._x, yerr=self.kernel._pv[-1], sort=False)
+            self._gp.compute(self._x, yerr=self.kernel._pm[-1], sort=False)
             self.set_dirty(False)
     
     def negll(self, pv, y=None):
@@ -80,7 +80,7 @@ class SplitGP(GeorgeGP):
 
         if self.is_dirty:
             self._K0 = self._covariance_matrix(self._x, None, separate=False, add_wn=False)
-            self._K  = self._K0 + self.kernel._pv[-1]**2 * identity(self._K0.shape[0])
+            self._K  = self._K0 + self.kernel._pm[-1]**2 * identity(self._K0.shape[0])
             self._L  = sla.cho_factor(self._K)
             self.set_dirty(False)
 
@@ -122,7 +122,7 @@ class SplitGP(GeorgeGP):
             return K1, K2
         else:
             if add_wn:
-                return K1 + K2 + self.kernel._pv[-1]**2 * identity(K1.shape[0])
+                return K1 + K2 + self.kernel._pm[-1]**2 * identity(K1.shape[0])
             else:
                 return K1 + K2
 

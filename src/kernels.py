@@ -1,4 +1,5 @@
 import math as m
+import numpy as np
 
 from numpy import array, asarray, s_, log, pi, inf
 
@@ -19,6 +20,7 @@ class UniformPrior(Prior):
         self.b = b
         self.C = 1./(b-a)
         self.lnC = m.log(self.C)
+        self.lims = [a,b]
 
     def logpdf(self, x):
         if x > self.a and x < self.b:
@@ -51,11 +53,13 @@ class DtKernel(object):
 
     def __init__(self, p0=None, **kwargs):
         self._pv = asarray(p0) if p0 is not None else self.pv0
+        self._pm = None
         self._define_kernel()
         self._nk1 = len(self._k1)
         self._nk2 = len(self._k2)
         self._sk1 = s_[:self._nk1]
         self._sk2 = s_[self._nk1:-1]
+        self.lims = np.transpose([p.lims for p in self.priors])
 
         assert len(self._k) == self.npar - 1, "Expected and true number of kernel parameters do not match"
         assert len(self.names) == self.npar, "Number of parameter names doesn't match the number of parameters"
@@ -68,37 +72,63 @@ class DtKernel(object):
         self._k2 = None
         self._k  = None
 
+
+    def map_pv(self, pv):
+        raise NotImplementedError()
+
+    
     def set_pv(self, pv):
         self._pv = pv.copy()
-        self._k1[:] = log(pv[self._sk1])
-        self._k2[:] = log(pv[self._sk2])
-        self._k[:]  = log(pv[:-1])
+        pp = self.map_pv(pv)
+        self._k1[:] = log(pp[self._sk1])
+        self._k2[:] = log(pp[self._sk2])
+        self._k[:]  = log(pp[:-1])
 
     def ln_prior(self, pv):
         return sum([p.logpdf(v) for p,v in zip(self.priors,pv)])
-
+        
 
 class BasicKernel(DtKernel):
     name  = "BasicKernel"
     eq    = 'At*ESK(1/St) + Ap*ESK(1/Sx)*ESK(1/Sy)'
     names = 'time_amplitude time_iscale xy_amplitude x_iscale y_iscale white_noise '.split()
-    pv0   = array([1, 0.25, 1, 4, 4, 0.01])
+    pv0   = array([1e-4, 0.25, 1e-4, 4, 4, 0.01])
     ndim  = 3
     npar  = 6
-    priors = [UniformPrior(0,10),
+    priors = [UniformPrior(-6, 1),
               LogNormPrior(0.25, 1.25, lims=[0,2]),
-              UniformPrior(0,10),
-              LogNormPrior(6, 1),
-              LogNormPrior(6, 1),
-              UniformPrior(0,10)]
-    bounds = [[0,2],[0.01,1],[0,2],[2,50],[2,50],[0.01,1]]
-
+              UniformPrior(-6, 0),
+              LogNormPrior( 6, 1),
+              LogNormPrior( 6, 1),
+              UniformPrior(-6, 0)]
+    bounds = [[-5,-3],[0.01,1],[-5,-3],[2,50],[2,50],[-4,-2]] 
+    
     def _define_kernel(self):
         pv = self._pv
         self._k1 = pv[0] * ESK(1./pv[1], ndim=3, dim=0)
         self._k2 = pv[2] * ESK(1./pv[3], ndim=3, dim=1) * ESK(1./pv[4], ndim=3, dim=2)
         self._k   = self._k1 + self._k2
 
+    def map_pv(self, pv):
+        self._pm = pp = pv.copy()
+        pp[0] = 10**pv[0]
+        pp[1] =  1./pv[1]
+        pp[2] = 10**pv[2]
+        pp[3] =  1./pv[3]
+        pp[4] =  1./pv[4]
+        pp[5] = 10**pv[5]
+        return self._pm
+    
+
+class BasicKernelEP(BasicKernel):
+    name  = "BasicKernelEP"
+    eq    = 'At*ESK(1/St) + Ap*EK(1/Sx)*EK(1/Sy)'
+
+    def _define_kernel(self):
+        pv = self._pv
+        self._k1 = pv[0] * ESK(1./pv[1], ndim=3, dim=0)
+        self._k2 = pv[2] * EK(1./pv[3], ndim=3, dim=1) * EK(1./pv[4], ndim=3, dim=2)
+        self._k   = self._k1 + self._k2
 
 
 class PeriodicKernel(DtKernel):
@@ -125,20 +155,20 @@ class PeriodicKernel(DtKernel):
 class QuasiPeriodicKernel(BasicKernel):
     name  = 'QuasiPeriodicKernel'
     names = 'time_amplitude time_scale time_period time_evolution xy_amplitude x_scale y_scale white_noise '.split()
-    pv0   = array([1, 0.25, 10, 100, 1, 0.25, 0.25, 0.01])
+    pv0   = array([1, 0.25, 10, 0.01, 1, 0.25, 0.25, 0.01])
     ndim  = 3
     npar  = 8
 
-    priors = [UniformPrior(0, 5),    ## Time amplitude
-              LogNormPrior(0.25, 1.25, lims=[0,2]),    ## Inverse time scale
-              UniformPrior(0,25),    ## Period
-              UniformPrior(0,500),   ## Evolution
-              UniformPrior(0, 5),    ## XY amplitude
-              LogNormPrior(6, 1),    ## inverse X scale
-              LogNormPrior(6, 1),    ## inverse Y scale
-              UniformPrior(0,10)]    ## White noise
+    priors = [UniformPrior(-6,  1),                    ## 0 Time log10 amplitude
+              LogNormPrior( 0.25, 1.25, lims=[0,2]),  ## 1 Inverse time scale
+              UniformPrior( 0, 25),                    ## 2 Period
+              LogNormPrior( 0.25, 1.25, lims=[0,2]),  ## 3 Time Evolution
+              UniformPrior(-6,  0),                    ## 4 XY log10 amplitude
+              LogNormPrior( 6,  1),                    ## 5 inverse X scale
+              LogNormPrior( 6,  1),                    ## 6 inverse Y scale
+              UniformPrior(-6,  0)]                    ## 7 White noise
 
-    bounds = [[0,2],[0.1,10],[0,20],[0,500],[0,2],[1e-2,3],[1e-2,3],[0.01,1]]
+    bounds = [[-5,-2],[0.1,1],[0,20],[0.01,1],[-5,-2],[2,50],[2,50],[-4,-2]]
 
     def __init__(self, p0=None, period=5, evolution_scale=100, **kwargs):
         super(QuasiPeriodicKernel, self).__init__(p0, **kwargs)
@@ -149,11 +179,34 @@ class QuasiPeriodicKernel(BasicKernel):
 
     def _define_kernel(self):
         pv = self._pv
-        self._k1 = pv[0] * ESn2K(pv[1], pv[2], ndim=3, dim=0) * ESK(pv[3], ndim=3, dim=0)
+        self._k1 = pv[0] * ESn2K(pv[1], pv[2], ndim=3, dim=0) * ESK(1./pv[3], ndim=3, dim=0)
         self._k2 = pv[4] * ESK(1./pv[5], ndim=3, dim=1) * ESK(1./pv[6], ndim=3, dim=2)
         self._k  = self._k1 + self._k2
 
+    def map_pv(self, pv):
+        self._pm = pp = pv.copy()
+        pp[0] = 10**pv[0]
+        pp[3] =  1./pv[3]
+        pp[4] = 10**pv[4]
+        pp[5] =  1./pv[5]
+        pp[6] =  1./pv[6]
+        pp[7] = 10**pv[7]
+        return self._pm
+
+
+class QuasiPeriodicKernelEP(QuasiPeriodicKernel):
+    name  = "QuasiPeriodicKernelEP"
+    eq    = ''
+
+    def _define_kernel(self):
+        pv = self._pv
+        self._k1 = pv[0] * ESn2K(pv[1], pv[2], ndim=3, dim=0) * ESK(1./pv[3], ndim=3, dim=0)
+        self._k2 = pv[4] * EK(1./pv[5], ndim=3, dim=1) * EK(1./pv[6], ndim=3, dim=2)
+        self._k  = self._k1 + self._k2
+    
         
 kernels = dict(basic         = BasicKernel,
+               basic_ep      = BasicKernelEP,
                periodic      = PeriodicKernel,
-               quasiperiodic = QuasiPeriodicKernel)
+               quasiperiodic = QuasiPeriodicKernel,
+               quasiperiodic_ep = QuasiPeriodicKernelEP)

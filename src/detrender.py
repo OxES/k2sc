@@ -65,7 +65,8 @@ class Detrender(object):
     
         
     def neglnposterior(self, pv, training=True):
-        if any(pv<0) or (pv[-1] < 1e-6): return inf
+        if any(pv < self.kernel.lims[0]) or any(self.kernel.lims[1] < pv):
+            return inf
         ds = self.tr_data if training else self.data
         return -(self.kernel.ln_prior(pv) + 
                  self.gp.lnlikelihood(pv, ds.masked_normalised_flux, ds.masked_inputs))
