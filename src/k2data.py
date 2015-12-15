@@ -5,7 +5,7 @@ arrays (using different aperture size, etc.)
 from __future__ import division
 import numpy as np
 
-from numpy import array, atleast_2d, ones, ones_like, argmax, all, isfinite, tile, extract
+from numpy import array, atleast_2d, ones, ones_like, argmax, all, isfinite, tile, extract, zeros_like
 from scipy.ndimage import binary_dilation, binary_erosion
 from scipy.signal import medfilt
 
@@ -104,7 +104,7 @@ class K2Data(object):
         self._update_mask()
 
 
-    def mask_outliers(self, outlier_sigma=10, outlier_mwidth=5):
+    def mask_outliers(self, outlier_sigma=5, outlier_mwidth=5):
         """Identify short-duration outliers.
 
         Parameters
@@ -113,7 +113,8 @@ class K2Data(object):
         outlier_mwidth : float, optional
         """
         for iset, (flux,mask) in enumerate(zip(self.fluxes, self.masks)):
-            r = flux - medfilt(flux, outlier_mwidth)
+            r = zeros_like(flux)
+            r[mask] = flux[mask] - medfilt(flux[mask], outlier_mwidth)
             fmed,fstd = medsig(flux[mask])
             rmed,rstd = medsig(r[mask])
             self.omasks_u[iset,mask] = r[mask] <  outlier_sigma*rstd
