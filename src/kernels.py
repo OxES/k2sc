@@ -179,13 +179,14 @@ class QuasiPeriodicKernel(BasicKernel):
 
     def _define_kernel(self):
         pv = self._pv
-        self._k1 = pv[0] * ESn2K(pv[1], pv[2], ndim=3, dim=0) * ESK(1./pv[3], ndim=3, dim=0)
+        self._k1 = pv[0] * ESn2K(1./pv[1], pv[2], ndim=3, dim=0) * ESK(1./pv[3], ndim=3, dim=0)
         self._k2 = pv[4] * ESK(1./pv[5], ndim=3, dim=1) * ESK(1./pv[6], ndim=3, dim=2)
         self._k  = self._k1 + self._k2
 
     def map_pv(self, pv):
         self._pm = pp = pv.copy()
         pp[0] = 10**pv[0]
+        pp[1] =  1./pv[1]
         pp[3] =  1./pv[3]
         pp[4] = 10**pv[4]
         pp[5] =  1./pv[5]
@@ -200,7 +201,7 @@ class QuasiPeriodicKernelEP(QuasiPeriodicKernel):
 
     def _define_kernel(self):
         pv = self._pv
-        self._k1 = pv[0] * ESn2K(pv[1], pv[2], ndim=3, dim=0) * ESK(1./pv[3], ndim=3, dim=0)
+        self._k1 = pv[0] * ESn2K(1./pv[1], pv[2], ndim=3, dim=0) * ESK(1./pv[3], ndim=3, dim=0)
         self._k2 = pv[4] * EK(1./pv[5], ndim=3, dim=1) * EK(1./pv[6], ndim=3, dim=2)
         self._k  = self._k1 + self._k2
     
