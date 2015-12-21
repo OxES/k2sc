@@ -5,12 +5,13 @@ arrays (using different aperture size, etc.)
 from __future__ import division
 import numpy as np
 
-from numpy import array, atleast_2d, ones, ones_like, argmax, all, isfinite, tile, extract, zeros_like
+from numpy import array, atleast_2d, zeros, ones, ones_like, argmax, all, isfinite, tile, extract, zeros_like
 from scipy.ndimage import binary_dilation, binary_erosion
 from scipy.signal import medfilt
 
 from ls import fasper
-from utils import medsig
+from utils import medsig, fold
+from core import *
 
 class K2Data(object):
     """Encapsulates the K2 data.
@@ -79,12 +80,20 @@ class K2Data(object):
 
 
     def initialize_masks(self):
+        self.mflags   = zeros([self.nsets, self.npoints], np.uint8)
         self.qmask    = all(isfinite(self.fluxes),0) & (self.quality==0)
+        self.pmask    = ones(self.npoints, np.bool)
         self.fmasks   = ones([self.nsets, self.npoints], np.bool)
         self.tmasks   = ones([self.nsets, self.npoints], np.bool)
         self.omasks_u = ones_like(self.fmasks)
         self.omasks_d = ones_like(self.fmasks)
         self.masks    = tile(self.qmask, [self.nsets,1])
+        self.mflags[~self.masks] |= M_QUALITY
+
+
+    def mask_periodic_signal(self, center, period, duration):
+        self.pmask = np.abs(fold(self.time, period, center, shift=0.5) - 0.5)*period > 0.5*duration
+        self.mflags[:,~self.pmask] |= M_PERIODIC
 
         
     def mask_flares(self, flare_sigma=5, flare_erosion=5):
@@ -101,6 +110,7 @@ class K2Data(object):
             fmed,fstd = medsig(flux[mask])
             self.fmasks[iset,mask] = (flux[mask] - fmed) <  flare_sigma *  fstd
             self.fmasks[iset,:] = binary_erosion(self.fmasks[iset,:], border_value=1, iterations=flare_erosion)
+        self.mflags[~self.fmasks] |= M_FLARE
         self._update_mask()
 
 
@@ -119,6 +129,8 @@ class K2Data(object):
             rmed,rstd = medsig(r[mask])
             self.omasks_u[iset,mask] = r[mask] <  outlier_sigma*rstd
             self.omasks_d[iset,mask] = r[mask] > -outlier_sigma*rstd
+            self.mflags[~self.omasks_u] |= M_OUTLIER_U
+            self.mflags[~self.omasks_d] |= M_OUTLIER_D
         self._update_mask()
 
 
@@ -149,4 +161,4 @@ class K2Data(object):
 
 
     def _update_mask(self):
-        self.masks = self.qmask & self.fmasks & self.omasks_u & self.omasks_d
+        self.masks = self.qmask & self.fmasks & self.omasks_u & self.omasks_d & self.pmask

@@ -81,6 +81,11 @@ def detrend(dataset):
         ds.initialize_masks()
         ds.mask_flares(args.flare_sigma, args.flare_erosion)
 
+    ## Periodic signal masking
+    ## -----------------------
+    if args.p_mask_center and args.p_mask_period and args.p_mask_duration:
+        ds.mask_periodic_signal(args.p_mask_center, args.p_mask_period, args.p_mask_duration)
+        
     ## Lomb-Scargle period search
     ## --------------------------
     info('Starting Lomb-Scargle period search')
@@ -186,6 +191,9 @@ if __name__ == '__main__':
     ap.add_argument('--flux-type', default='sap', type=str)
     ap.add_argument('--kernel', choices=kernels.keys(), default=None)
     ap.add_argument('--kernel-period', type=float, default=None)
+    ap.add_argument('--p-mask-center', type=float, default=None)
+    ap.add_argument('--p-mask-period', type=float, default=None)
+    ap.add_argument('--p-mask-duration', type=float, default=None)
     gts.add_argument('--tr-nrandom', default=300, type=int, help='Number of random samples')
     gts.add_argument('--tr-nblocks', default=6, type=int, help='Number of sample blocks')
     gts.add_argument('--tr-bspan', default=50, type=int, help='Span of a single block')
