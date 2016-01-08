@@ -157,13 +157,13 @@ class SPLOXReader(DataReader):
                                    np.zeros_like(fluxes), data['x'], data['y'], fin[0].header)
 
         return K2Data(cls._cache.objno[sid],
-                      time=cls._cache.time,
-                      cadence=cls._cache.cadence,
-                      quality=cls._cache.quality,
-                      fluxes=cls._cache.fluxes[sid,:,:],
-                      errors=cls._cache.errors[sid,:,:],
-                      x=cls._cache.x[sid,:],
-                      y=cls._cache.y[sid,:],
+                      time=cls._cache.time[:-1],
+                      cadence=cls._cache.cadence[:-1],
+                      quality=cls._cache.quality[:-1],
+                      fluxes=cls._cache.fluxes[sid,:,:-1],
+                      errors=cls._cache.errors[sid,:,:-1],
+                      x=cls._cache.x[sid,:-1],
+                      y=cls._cache.y[sid,:-1],
                       sap_header=cls._cache.header)    
 
     
