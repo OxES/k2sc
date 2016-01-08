@@ -112,6 +112,8 @@ def detrend(dataset):
     Result = namedtuple('SCResult', 'detrender pv tr_time tr_position cdpp_r cdpp_t cdpp_c warn')
     results = []
     for iset in range(ds.nsets):
+        if ds.nsets > 1:
+            logger.name = 'Worker {:d} <{:d}-{:d}>'.format(mpi_rank, dataset.epic, iset+1)
         np.random.seed(args.seed)
         tstart = time()
         inputs = np.transpose([ds.time,ds.x,ds.y])
