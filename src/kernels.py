@@ -1,3 +1,5 @@
+from __future__ import division
+
 import math as m
 import numpy as np
 
@@ -27,6 +29,28 @@ class UniformPrior(Prior):
             return self.lnC
         else:
             return -inf
+
+class NormalPrior(Prior):
+    def __init__(self, mean, std, lims=None):
+        self.lims = np.array(lims)
+        self.a, self.b = lims
+        self.mean = float(mean)
+        self.std = float(std)
+        self._f1 = 1./ m.sqrt(2.*m.pi*std*std)
+        self._lf1 = m.log(self._f1)
+        self._f2 = 1./ (2.*std*std)
+
+    def __call__(self, x):
+        if isinstance(x, np.ndarray):
+            return np.where((self.a < x) & (x < self.b),  self._f1 * np.exp(-(x-self.mean)**2 * self._f2), 1e-80)
+        else:
+            return self._f1 * m.exp(-(x-self.mean)**2 * self._f2) if self.lims[0] < x < self.lims[1] else 1e-80
+
+    def logpdf(self, x):
+        if isinstance(x, np.ndarray):
+            return np.where((self.a < x) & (x < self.b),  self._lf1 - (x-self.mean)**2 * self._f2, -np.inf)
+        else:
+            return self._lf1 -(x-self.mean)**2*self._f2 if self.a < x < self.b else -np.inf
 
 
 class LogNormPrior(Prior):
@@ -95,13 +119,13 @@ class BasicKernel(DtKernel):
     pv0   = array([1e-4, 0.25, 1e-4, 4, 4, 0.01])
     ndim  = 3
     npar  = 6
-    priors = [UniformPrior(-6, 1),
-              LogNormPrior(0.25, 1.25, lims=[0,2]),
-              UniformPrior(-6, 0),
-              LogNormPrior( 6, 1),
-              LogNormPrior( 6, 1),
+    priors = [UniformPrior(-7, 1),
+              LogNormPrior(0.25, 1.25, lims=[0,1]),
+              UniformPrior(-7, 0),
+              NormalPrior( 17, 8, lims=[0,70]),
+              NormalPrior( 17, 8, lims=[0,70]),
               UniformPrior(-6, 0)]
-    bounds = [[-5,-3],[0.01,1],[-5,-3],[2,50],[2,50],[-4,-2]] 
+    bounds = [[-5,-3],[0.01,0.6],[-5,-3],[2,20],[2,20],[-4,-2]] 
     
     def _define_kernel(self):
         pv = self._pv
@@ -160,12 +184,12 @@ class QuasiPeriodicKernel(BasicKernel):
     npar  = 8
 
     priors = [UniformPrior(-6,  1),                    ## 0 Time log10 amplitude
-              LogNormPrior( 0.25, 1.25, lims=[0,2]),  ## 1 Inverse time scale
+              LogNormPrior( 0.25, 1.25, lims=[0,2]),   ## 1 Inverse time scale
               UniformPrior( 0, 25),                    ## 2 Period
-              LogNormPrior( 0.25, 1.25, lims=[0,2]),  ## 3 Time Evolution
+              LogNormPrior( 0.25, 1.25, lims=[0,2]),   ## 3 Time Evolution
               UniformPrior(-6,  0),                    ## 4 XY log10 amplitude
-              LogNormPrior( 6,  1),                    ## 5 inverse X scale
-              LogNormPrior( 6,  1),                    ## 6 inverse Y scale
+              NormalPrior( 17, 8, lims=[0,70]),        ## 5 inverse X scale
+              NormalPrior( 17, 8, lims=[0,70]),        ## 6 inverse Y scale
               UniformPrior(-6,  0)]                    ## 7 White noise
 
     bounds = [[-5,-2],[0.1,1],[0,20],[0.01,1],[-5,-2],[2,50],[2,50],[-4,-2]]
