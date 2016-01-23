@@ -1,0 +1,56 @@
+#!/usr/bin/env python
+"""Gathers the auxiliary information from a set of MAST fits files into a Pandas table.
+"""
+from __future__ import division
+import sys
+import numpy as np
+import pyfits as pf
+import pandas as pd
+
+from os.path import join, abspath, basename, exists
+from argparse import ArgumentParser
+from glob import glob
+
+from numpy import array, arange, zeros, transpose, fromstring, r_
+from numpy.random import permutation
+
+if __name__ == '__main__':
+    ap = ArgumentParser()
+    ap.add_argument('hdfname', help='HDF file to save the gathered cdpp data')
+    ap.add_argument('datadir', help='Directory containing the reduced data')
+    ap.add_argument('--random-sample', default=None, type=int)
+    args = ap.parse_args()
+
+    files = sorted(glob(join(args.datadir,'EPIC_*.fits')))
+    epics = np.array(map(lambda fn:int(basename(fn).split('_')[1]), files), dtype=np.uint32)
+
+    if args.random_sample:
+        files = permutation(files)[:args.random_sample]
+    
+    c_basic = ('time_amplitude time_iscale xy_amplitude x_iscale y_iscale '
+               'white_noise cdppr cdppt cdppc').split()
+    c_qperi = ('time_amplitude time_scale time_period time_evolution '
+               'xy_amplitude x_scale y_scale white_noise cdppr cdppt cdppc').split()
+
+    hps_qperi = []
+    hps_basic = []
+
+    for i,f in enumerate(files):
+        name = pf.getval(f, 'ker_name', 1)
+        e = [pf.getval(f, 'epic', 1)]
+        v = fromstring(pf.getval(f, 'ker_hps1', 1).strip('[]'), sep=' ')
+        s = [pf.getval(f, 'cdpp1r', 1), pf.getval(f, 'cdpp1t', 1), pf.getval(f, 'cdpp1c', 1)]
+        if 'basic' in name.lower():
+            hps_basic.append(r_[e,v,s])
+        else:
+            hps_qperi.append(r_[e,v,s])
+        sys.stdout.write('\r{:5d}/{:5d}'.format(i,len(files)))
+        sys.stdout.flush()
+    print()
+        
+    hps_basic = array(hps_basic)
+    hps_qperi = array(hps_qperi)
+    dfb = pd.DataFrame(hps_basic[:,1:], columns=c_basic, index=hps_basic[:,0].astype(np.uint32))
+    dfp = pd.DataFrame(hps_qperi[:,1:], columns=c_qperi, index=hps_qperi[:,0].astype(np.uint32))
+    dfb.to_hdf(args.hdfname, 'basic')
+    dfp.to_hdf(args.hdfname, 'quasiperiodic')
