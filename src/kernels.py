@@ -185,7 +185,7 @@ class QuasiPeriodicKernel(BasicKernel):
 
     priors = [UniformPrior(-6,  1),                    ## 0 Time log10 amplitude
               LogNormPrior( 0.25, 1.25, lims=[0,2]),   ## 1 Inverse time scale
-              UniformPrior( 0, 25),                    ## 2 Period
+              UniformPrior( 0.10, 25),                 ## 2 Period
               LogNormPrior( 0.25, 1.25, lims=[0,2]),   ## 3 Time Evolution
               UniformPrior(-6,  0),                    ## 4 XY log10 amplitude
               NormalPrior( 17, 8, lims=[0,70]),        ## 5 inverse X scale
