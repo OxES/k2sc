@@ -208,10 +208,6 @@ class FITSWriter(object):
             cols.extend([C(name='flux_%d'    %(i+1), format='D', array=unpack(data.fluxes[i])),
                          C(name='error_%d'   %(i+1), format='D', array=unpack(data.errors[i])),
                          C(name='mflags_%d'  %(i+1), format='B', array=unpack(data.mflags[i])),
-                         C(name='mask_ou_%d' %(i+1), format='D', array=unpack(data.omasks_u[i])),
-                         C(name='mask_od_%d' %(i+1), format='D', array=unpack(data.omasks_d[i])),
-                         C(name='mask_fl_%d' %(i+1), format='D', array=unpack(data.fmasks[i])),
-                         C(name='mask_ol_%d' %(i+1), format='D', array=unpack(dtres[i].detrender.data.outlier_mask)),
                          C(name='trend_t_%d' %(i+1), format='D', array=unpack(dtres[i].tr_time)),
                          C(name='trend_p_%d' %(i+1), format='D', array=unpack(dtres[i].tr_position))])
 

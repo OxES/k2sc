@@ -25,7 +25,7 @@ except ImportError:
 from copy import copy   
 from collections import namedtuple
 from matplotlib.backends.backend_pdf import PdfPages
-from numpy import any, array, ones_like, fromstring, tile, median
+from numpy import any, array, ones_like, fromstring, tile, median, isfinite, nanmean
 from numpy.random import normal
 
 from time import time, sleep
@@ -33,11 +33,13 @@ from datetime import datetime
 from os.path import join, exists, abspath, basename
 from argparse import ArgumentParser
 
+from k2sc.core import *
 from k2sc.detrender import Detrender
 from k2sc.kernels import kernels, BasicKernel, QuasiPeriodicKernel
 from k2sc.k2io import select_reader, FITSWriter, SPLOXReader
 from k2sc.cdpp import cdpp
 from k2sc.de import DiffEvol
+from k2sc.ls import fasper
 
 warnings.resetwarnings()
 warnings.filterwarnings('ignore', category=UserWarning, append=True)
@@ -48,6 +50,10 @@ warnings.filterwarnings('ignore', category=DeprecationWarning, append=True)
 
 mpi_root = 0
 logging.basicConfig(level=logging.DEBUG, format='%(levelname)s %(name)s: %(message)s')
+
+def nanmedian(a):
+    return np.median(a[isfinite(a)])
+
 
 def detrend(dataset):
     ## Setup the logger
@@ -65,32 +71,65 @@ def detrend(dataset):
     ## ----------------------------
     ds = dataset
     info = logger.info
-    
-    ## Outlier detection and masking
-    ## -----------------------------
-    ## We try to identify strong flares and deep transi-like events that would
-    ## mess up the Lomb-Scargle period detection. However, in some cases the
-    ## outlier detection will fail (rapidly varying stars), and we need to use
-    ## only the mask based on the quality flags.
-    ## --------------------------------------------------------------------------
-    ds.mask_flares(args.flare_sigma, args.flare_erosion)
-    ds.mask_outliers(args.outlier_sigma, args.outlier_mwidth)
-    r_outliers_u = (~ds.omasks_u).sum(1) / ds.omasks_u.shape[1]
-    r_outliers_d = (~ds.omasks_d).sum(1) / ds.omasks_d.shape[1]
-    if any(r_outliers_u+r_outliers_d > 0.25): 
-        ds.initialize_masks()
-        ds.mask_flares(args.flare_sigma, args.flare_erosion)
 
     ## Periodic signal masking
     ## -----------------------
     if args.p_mask_center and args.p_mask_period and args.p_mask_duration:
         ds.mask_periodic_signal(args.p_mask_center, args.p_mask_period, args.p_mask_duration)
-        
-    ## Lomb-Scargle period search
-    ## --------------------------
-    info('Starting Lomb-Scargle period search')
-    ds.search_for_periodicity(args.ls_min_period, args.ls_max_period, args.ls_min_power)
 
+    ## Initial outlier and period detection
+    ## ------------------------------------
+    ## We carry out an initial outlier and period detection using
+    ## a default GP hyperparameter vector based on campaign 4 fits
+    ## done using (almost) noninformative priors.
+    masks = []
+    for iset in range(ds.nsets):
+        flux = ds.fluxes[iset]
+        inputs = np.transpose([ds.time,ds.x,ds.y])
+        detrender = Detrender(flux, inputs, mask=isfinite(flux),
+                            splits=splits, kernel=BasicKernel(),
+                            tr_nrandom=args.tr_nrandom,
+                            tr_nblocks=args.tr_nblocks, tr_bspan=args.tr_bspan)
+    
+        ttrend,ptrend = detrender.predict(detrender.kernel.pv0+1e-5, components=True)
+        cflux = flux-ptrend+median(ptrend)-ttrend+median(ttrend)
+        cflux /= nanmedian(cflux)
+        mad = nanmedian(abs(cflux-nanmean(cflux)))
+        sigma = 1.4826*mad
+
+        fmask = isfinite(flux)
+        omask = ones_like(fmask)
+        omask[fmask] = (cflux[fmask] < 1+5*sigma) & (cflux[fmask] > 1-5*sigma)
+
+        masks.append(fmask)
+        if (~omask).sum() / omask.size < 0.25:
+            masks[iset] &= omask
+
+        ## Lomb-Scargle period search
+        ## --------------------------
+        info('Starting Lomb-Scargle period search')
+        nflux = flux - ptrend + nanmedian(ptrend)
+        for split in detrender.gp.splits:
+            i = np.argmin(abs(ds.time - split))
+            nflux[i:] += nanmedian(nflux[i-10:i]) - nanmedian(nflux[i:i+10])
+        
+        freq,power,nout,jmax,prob = fasper(ds.time[masks[iset]], nflux[masks[iset]], 6, 0.5)
+        period = 1./freq
+
+        m = (period > args.ls_min_period) & (period < args.ls_max_period) 
+        period, power = period[m], power[m]
+        j = np.argmax(power)
+        expy = np.exp(-power[j])
+        effm = 2.*nout/6
+        fap  = expy*effm
+        if fap > 0.01: 
+            fap = 1.0-(1.0-expy)**effm
+
+        if fap < 0.01:
+            ds.is_periodic = True
+            ds.ls_power = fap
+            ds.ls_period = period[j]
+        
     ## Kernel selection
     ## ----------------
     if args.kernel:
@@ -117,7 +156,7 @@ def detrend(dataset):
         np.random.seed(args.seed)
         tstart = time()
         inputs = np.transpose([ds.time,ds.x,ds.y])
-        detrender = Detrender(ds.fluxes[iset], inputs, mask=ds.masks[iset],
+        detrender = Detrender(ds.fluxes[iset], inputs, mask=masks[iset],
                               splits=splits, kernel=kernel, tr_nrandom=args.tr_nrandom,
                               tr_nblocks=args.tr_nblocks, tr_bspan=args.tr_bspan)
         de = DiffEvol(detrender.neglnposterior, kernel.bounds, args.de_npop)
@@ -149,7 +188,24 @@ def detrend(dataset):
         info('Local minimum found at: %s', np.array_str(pv, precision=3))
 
         info('Masking outliers')
-        detrender.mask_outliers(pv=pv)
+        flux = detrender.data.unmasked_flux
+        ttrend,ptrend = detrender.predict(pv, components=True)
+        cflux = flux-ptrend+median(ptrend)-ttrend+median(ttrend)
+        cflux /= nanmedian(cflux)
+        mad = nanmedian(abs(cflux-nanmean(cflux)))
+        sigma = 1.4826*mad
+
+        minf  = isfinite(cflux)
+        mhigh = np.zeros_like(minf)
+        mlow  = np.zeros_like(minf)
+        mhigh[minf] = cflux[minf] > 1+5*sigma
+        mlow[minf]  = cflux[minf] < 1-5*sigma
+        mask = minf & (~mlow) & (~mhigh)
+
+        ds.mflags[iset][~minf] |= M_NOTFINITE
+        ds.mflags[iset][mhigh] |= M_OUTLIER_U
+        ds.mflags[iset][mlow]  |= M_OUTLIER_D
+        
         info('Computing time and position trends')
         tr_time,tr_position = detrender.predict(pv, components=True)
         cdpp_r = cdpp(detrender.data.masked_time,
@@ -280,8 +336,6 @@ if __name__ == '__main__':
                 if not exists(infile):
                     logger.warning("The input file {:s} doesn't exists, skipping the file".format(infile))
                     continue
-            logger.info('Reader setup: %s %s %s %s ',reader,infile, sid,args.flux_type)
-
             dataset = reader.read(infile, sid=sid, type=args.flux_type)
             detrend(dataset)
                                 

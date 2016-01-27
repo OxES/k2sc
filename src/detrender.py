@@ -47,9 +47,7 @@ class Detrender(object):
     def mask_outliers(self, max_sigma=5, pv=None):
         pv = self.kernel.pv0 if pv is None else pv
         qm = self.data.quality_mask
-        self.gp.compute(self.data.masked_inputs, pv)
-        self.gp._compute_alpha(self.data.masked_normalised_flux)
-        predicted_flux = self.gp.predict(self.data.unmasked_inputs, mean_only=True)
+        predicted_flux = self.predict(pv)
         residuals = self.data.unmasked_normalised_flux - predicted_flux
         flux_median, flux_std = medsig(residuals[qm])
         outlier_mask = ones_like(self.data.mask)
@@ -74,7 +72,6 @@ class Detrender(object):
 
     def train(self, pv0=None, disp=False):
         pv0 = pv0 if pv0 is not None else self.kernel.pv0
-        #mres = minimize(self.neglnposterior, pv0, method='SLSQP')
         mres = minimize(self.neglnposterior, pv0, method='Powell')
         self.tr_pv = mres.x.copy()
         return self.tr_pv, mres.success

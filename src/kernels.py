@@ -77,7 +77,7 @@ class DtKernel(object):
 
     def __init__(self, p0=None, **kwargs):
         self._pv = asarray(p0) if p0 is not None else self.pv0
-        self._pm = None
+        self._pm = self.map_pv(self.pv0)
         self._define_kernel()
         self._nk1 = len(self._k1)
         self._nk2 = len(self._k2)
@@ -116,7 +116,7 @@ class BasicKernel(DtKernel):
     name  = "BasicKernel"
     eq    = 'At*ESK(1/St) + Ap*ESK(1/Sx)*ESK(1/Sy)'
     names = 'time_amplitude time_iscale xy_amplitude x_iscale y_iscale white_noise '.split()
-    pv0   = array([1e-4, 0.25, 1e-4, 4, 4, 0.01])
+    pv0   = array([-6.0, 0.25, -5.4, 21, 20, -3])
     ndim  = 3
     npar  = 6
     priors = [UniformPrior(-7, 1),
@@ -179,7 +179,7 @@ class PeriodicKernel(DtKernel):
 class QuasiPeriodicKernel(BasicKernel):
     name  = 'QuasiPeriodicKernel'
     names = 'time_amplitude time_scale time_period time_evolution xy_amplitude x_scale y_scale white_noise '.split()
-    pv0   = array([1, 0.25, 10, 0.01, 1, 0.25, 0.25, 0.01])
+    pv0   = array([-5.5, 0.25, 10, 0.01, 1, 0.25, 0.25, 0.01])
     ndim  = 3
     npar  = 8
 

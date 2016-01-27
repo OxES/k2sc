@@ -72,93 +72,15 @@ class K2Data(object):
         self.nsets   = self.fluxes.shape[0]
         self.npoints = self.fluxes.shape[1]
 
-        self.initialize_masks()
-        
         self.is_periodic = False
         self.ls_period = None
         self.ls_power = None
 
-
-    def initialize_masks(self):
+        qmask    = all(isfinite(self.fluxes),0) & (self.quality==0)
         self.mflags   = zeros([self.nsets, self.npoints], np.uint8)
-        self.qmask    = all(isfinite(self.fluxes),0) & (self.quality==0)
-        self.pmask    = ones(self.npoints, np.bool)
-        self.fmasks   = ones([self.nsets, self.npoints], np.bool)
-        self.tmasks   = ones([self.nsets, self.npoints], np.bool)
-        self.omasks_u = ones_like(self.fmasks)
-        self.omasks_d = ones_like(self.fmasks)
-        self.masks    = tile(self.qmask, [self.nsets,1])
-        self.mflags[~self.masks] |= M_QUALITY
+        self.mflags[:,~qmask] |= M_QUALITY
 
 
     def mask_periodic_signal(self, center, period, duration):
         self.pmask = np.abs(fold(self.time, period, center, shift=0.5) - 0.5)*period > 0.5*duration
         self.mflags[:,~self.pmask] |= M_PERIODIC
-
-        
-    def mask_flares(self, flare_sigma=5, flare_erosion=5):
-        """Identify and mask flares.
-        
-        Strong flares will screw up the period search and are easy to identify.
-
-        Parameters
-        ----------
-        flare_sigma : float, optional
-        flare_erosion : float, optional
-        """
-        for iset, (flux,mask) in enumerate(zip(self.fluxes, self.masks)):
-            fmed,fstd = medsig(flux[mask])
-            self.fmasks[iset,mask] = (flux[mask] - fmed) <  flare_sigma *  fstd
-            self.fmasks[iset,:] = binary_erosion(self.fmasks[iset,:], border_value=1, iterations=flare_erosion)
-        self.mflags[~self.fmasks] |= M_FLARE
-        self._update_mask()
-
-
-    def mask_outliers(self, outlier_sigma=5, outlier_mwidth=5):
-        """Identify short-duration outliers.
-
-        Parameters
-        ----------
-        outlier_sigma : float, optional
-        outlier_mwidth : float, optional
-        """
-        for iset, (flux,mask) in enumerate(zip(self.fluxes, self.masks)):
-            r = zeros_like(flux)
-            r[mask] = flux[mask] - medfilt(flux[mask], outlier_mwidth)
-            fmed,fstd = medsig(flux[mask])
-            rmed,rstd = medsig(r[mask])
-            self.omasks_u[iset,mask] = r[mask] <  outlier_sigma*rstd
-            self.omasks_d[iset,mask] = r[mask] > -outlier_sigma*rstd
-            self.mflags[~self.omasks_u] |= M_OUTLIER_U
-            self.mflags[~self.omasks_d] |= M_OUTLIER_D
-        self._update_mask()
-
-
-    def search_for_periodicity(self, min_period=0.25, max_period=20, ls_min_power=100):
-        """Search for periodicity using a Lomb-Scargle periodogram.
-
-        Parameters
-        ----------
-        min_period : float, optional
-        max_period : float, optional
-        ls_min_power : float, optional
-        """
-        for iset, (flux,mask) in enumerate(zip(self.fluxes, self.masks)):
-            freq,power,_,_,_ = fasper(self.time[mask], flux[mask], 6, 0.5)
-            msize = min(freq.size,power.size)
-            freq,power = freq[:msize], power[:msize]
-            period = 1/freq
-            pmask = (period > min_period) & (period < max_period)
-            period, power = period[pmask], power[pmask]
-            i = argmax(power)
-
-            if (power[i] >ls_min_power) & (power[i] > self.ls_power):
-                self.is_periodic = True
-                self.ls_period = period[i]
-                self.ls_power = power[i]
-
-        return self.is_periodic
-
-
-    def _update_mask(self):
-        self.masks = self.qmask & self.fmasks & self.omasks_u & self.omasks_d & self.pmask
