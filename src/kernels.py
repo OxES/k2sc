@@ -116,7 +116,7 @@ class BasicKernel(DtKernel):
     name  = "BasicKernel"
     eq    = 'At*ESK(1/St) + Ap*ESK(1/Sx)*ESK(1/Sy)'
     names = 'time_amplitude time_iscale xy_amplitude x_iscale y_iscale white_noise '.split()
-    pv0   = array([-6.0, 0.25, -5.4, 21, 20, -3])
+    pv0   = array([-6.0, 0.25, -5.4, 21, 21, -3])
     ndim  = 3
     npar  = 6
     priors = [UniformPrior(-7, 1),
@@ -129,8 +129,8 @@ class BasicKernel(DtKernel):
     
     def _define_kernel(self):
         pv = self._pv
-        self._k1 = pv[0] * ESK(1./pv[1], ndim=3, dim=0)
-        self._k2 = pv[2] * ESK(1./pv[3], ndim=3, dim=1) * ESK(1./pv[4], ndim=3, dim=2)
+        self._k1 = pv[0] * ESK(1/pv[1], ndim=3, dim=0)
+        self._k2 = pv[2] * ESK(1/pv[3], ndim=3, dim=1) * ESK(1/pv[4], ndim=3, dim=2)
         self._k   = self._k1 + self._k2
 
     def map_pv(self, pv):
@@ -147,11 +147,18 @@ class BasicKernel(DtKernel):
 class BasicKernelEP(BasicKernel):
     name  = "BasicKernelEP"
     eq    = 'At*ESK(1/St) + Ap*EK(1/Sx)*EK(1/Sy)'
+    priors = [UniformPrior(-7, 1),
+              LogNormPrior(0.25, 1.25, lims=[0,1]),
+              UniformPrior(-7, 0),
+              NormalPrior( 10, 15, lims=[0,70]),
+              NormalPrior( 10, 15, lims=[0,70]),
+              UniformPrior(-6, 0)]
+    bounds = [[-5,-3],[0.01,0.6],[-5,-3],[2,20],[2,20],[-4,-2]] 
 
     def _define_kernel(self):
         pv = self._pv
-        self._k1 = pv[0] * ESK(1./pv[1], ndim=3, dim=0)
-        self._k2 = pv[2] * EK(1./pv[3], ndim=3, dim=1) * EK(1./pv[4], ndim=3, dim=2)
+        self._k1 = pv[0] * ESK(1/pv[1], ndim=3, dim=0)
+        self._k2 = pv[2] * EK(1/pv[3], ndim=3, dim=1) * EK(1/pv[4], ndim=3, dim=2)
         self._k   = self._k1 + self._k2
 
 
@@ -178,11 +185,10 @@ class PeriodicKernel(DtKernel):
 
 class QuasiPeriodicKernel(BasicKernel):
     name  = 'QuasiPeriodicKernel'
-    names = 'time_amplitude time_scale time_period time_evolution xy_amplitude x_scale y_scale white_noise '.split()
-    pv0   = array([-5.5, 0.25, 10, 0.01, 1, 0.25, 0.25, 0.01])
+    names = 'time_amplitude time_iscale time_period time_evolution xy_amplitude x_iscale y_iscale white_noise '.split()
+    pv0   = array([-6.0, 0.25, 10, 0.01, -5.4, 21, 21, -3])
     ndim  = 3
     npar  = 8
-
     priors = [UniformPrior(-6,  1),                    ## 0 Time log10 amplitude
               LogNormPrior( 0.25, 1.25, lims=[0,2]),   ## 1 Inverse time scale
               UniformPrior( 0.25, 45),                 ## 2 Period
@@ -203,8 +209,8 @@ class QuasiPeriodicKernel(BasicKernel):
 
     def _define_kernel(self):
         pv = self._pv
-        self._k1 = pv[0] * ESn2K(1./pv[1], pv[2], ndim=3, dim=0) * ESK(1./pv[3], ndim=3, dim=0)
-        self._k2 = pv[4] * ESK(1./pv[5], ndim=3, dim=1) * ESK(1./pv[6], ndim=3, dim=2)
+        self._k1 = pv[0] * ESn2K(1/pv[1], pv[2], ndim=3, dim=0) * ESK(1/pv[3], ndim=3, dim=0)
+        self._k2 = pv[4] * ESK(1/pv[5], ndim=3, dim=1) * ESK(1/pv[6], ndim=3, dim=2)
         self._k  = self._k1 + self._k2
 
     def map_pv(self, pv):
@@ -222,11 +228,19 @@ class QuasiPeriodicKernel(BasicKernel):
 class QuasiPeriodicKernelEP(QuasiPeriodicKernel):
     name  = "QuasiPeriodicKernelEP"
     eq    = ''
+    priors = [UniformPrior(-6,  1),                    ## 0 Time log10 amplitude
+              LogNormPrior( 0.25, 1.25, lims=[0,2]),   ## 1 Inverse time scale
+              UniformPrior( 0.25, 45),                 ## 2 Period
+              LogNormPrior( 0.25, 1.25, lims=[0,2]),   ## 3 Time Evolution
+              UniformPrior(-6,  0),                    ## 4 XY log10 amplitude
+              NormalPrior( 10, 15, lims=[0,70]),       ## 5 inverse X scale
+              NormalPrior( 10, 15, lims=[0,70]),       ## 6 inverse Y scale
+              UniformPrior(-6,  0)]                    ## 7 White noise
 
     def _define_kernel(self):
         pv = self._pv
-        self._k1 = pv[0] * ESn2K(1./pv[1], pv[2], ndim=3, dim=0) * ESK(1./pv[3], ndim=3, dim=0)
-        self._k2 = pv[4] * EK(1./pv[5], ndim=3, dim=1) * EK(1./pv[6], ndim=3, dim=2)
+        self._k1 = pv[0] * ESn2K(1/pv[1], pv[2], ndim=3, dim=0) * ESK(1/pv[3], ndim=3, dim=0)
+        self._k2 = pv[4] * EK(1/pv[5], ndim=3, dim=1) * EK(1/pv[6], ndim=3, dim=2)
         self._k  = self._k1 + self._k2
     
         

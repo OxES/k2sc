@@ -237,7 +237,6 @@ class FITSWriter(object):
         primary_hdu = pf.PrimaryHDU(header=data.sap_header)
         hdu_list = pf.HDUList([primary_hdu, hdu])
         hdu_list.writeto(fname, clobber=True)
-        print 'Saved to', fname
 
 
 readers = [AMCReader,MASTReader,SPLOXReader]
