@@ -9,64 +9,7 @@ from george.kernels import ExpSquaredKernel as ESK
 from george.kernels import ExpSine2Kernel as ESn2K
 from george.kernels import ExpKernel as EK
 
-class Prior(object):
-    def __init__(self):
-        raise NotImplementedError()
-    def logpdf(self, x):
-        raise NotImplementedError()
-
-
-class UniformPrior(Prior):
-    def __init__(self, a, b):
-        self.a = a
-        self.b = b
-        self.C = 1./(b-a)
-        self.lnC = m.log(self.C)
-        self.lims = [a,b]
-
-    def logpdf(self, x):
-        if x > self.a and x < self.b:
-            return self.lnC
-        else:
-            return -inf
-
-class NormalPrior(Prior):
-    def __init__(self, mean, std, lims=None):
-        self.lims = np.array(lims)
-        self.a, self.b = lims
-        self.mean = float(mean)
-        self.std = float(std)
-        self._f1 = 1./ m.sqrt(2.*m.pi*std*std)
-        self._lf1 = m.log(self._f1)
-        self._f2 = 1./ (2.*std*std)
-
-    def __call__(self, x):
-        if isinstance(x, np.ndarray):
-            return np.where((self.a < x) & (x < self.b),  self._f1 * np.exp(-(x-self.mean)**2 * self._f2), 1e-80)
-        else:
-            return self._f1 * m.exp(-(x-self.mean)**2 * self._f2) if self.lims[0] < x < self.lims[1] else 1e-80
-
-    def logpdf(self, x):
-        if isinstance(x, np.ndarray):
-            return np.where((self.a < x) & (x < self.b),  self._lf1 - (x-self.mean)**2 * self._f2, -np.inf)
-        else:
-            return self._lf1 -(x-self.mean)**2*self._f2 if self.a < x < self.b else -np.inf
-
-
-class LogNormPrior(Prior):
-    def __init__(self, mu, sigma, lims=None):
-        self.mu = mu
-        self.sigma = sigma
-        self.C = -m.log(sigma*m.sqrt(2*pi))
-        self.lims = lims if lims is not None else [0,inf]
-
-    def logpdf(self, x):
-        if (x <= self.lims[0]) or (x > self.lims[1]):
-            return -inf
-        mu, sigma  = self.mu, self.sigma
-        lnx = m.log(x)
-        return -lnx + self.C - ((lnx*lnx - mu*lnx + mu*mu)/(2.*sigma*sigma))
-
+from priors import UniformPrior, NormalPrior, LogNormPrior as UP, NP, LP
 
 class DtKernel(object):
     names  = []
@@ -119,12 +62,12 @@ class BasicKernel(DtKernel):
     pv0   = array([-6.0, 0.25, -5.4, 21, 21, -3])
     ndim  = 3
     npar  = 6
-    priors = [UniformPrior(-7, 1),
-              LogNormPrior(0.25, 1.25, lims=[0,1]),
-              UniformPrior(-7, 0),
-              NormalPrior( 17, 8, lims=[0,70]),
-              NormalPrior( 17, 8, lims=[0,70]),
-              UniformPrior(-6, 0)]
+    priors = [UP(   -7,    1),              ## 0 -- log10 time amplitude
+              LP( 0.25, 1.25, lims=[0,1]),  ## 1 -- inverse time scale
+              UP(   -7,    0),              ## 2 -- xy log10 amplitude
+              NP(   17,    8, lims=[0,70]), ## 3 -- inverse x scale
+              NP(   17,    8, lims=[0,70]), ## 4 -- inverse y scale
+              UP(   -6,    0)]              ## 5 -- log10 white noise
     bounds = [[-5,-3],[0.01,0.6],[-5,-3],[2,20],[2,20],[-4,-2]] 
     
     def _define_kernel(self):
@@ -147,13 +90,12 @@ class BasicKernel(DtKernel):
 class BasicKernelEP(BasicKernel):
     name  = "BasicKernelEP"
     eq    = 'At*ESK(1/St) + Ap*EK(1/Sx)*EK(1/Sy)'
-    priors = [UniformPrior(-7, 1),
-              LogNormPrior(0.25, 1.25, lims=[0,1]),
-              UniformPrior(-7, 0),
-              NormalPrior( 10, 15, lims=[0,70]),
-              NormalPrior( 10, 15, lims=[0,70]),
-              UniformPrior(-6, 0)]
-    bounds = [[-5,-3],[0.01,0.6],[-5,-3],[2,20],[2,20],[-4,-2]] 
+    priors = [UP(  -7,    1),              ## 0 -- log10 time amplitude
+              LP(0.25, 1.25, lims=[0,1]),  ## 1 -- inverse time scale
+              UP(  -7,    0),              ## 2 -- xy log10 amplitude
+              NP(  10,   15, lims=[0,70]), ## 3 -- inverse x scale
+              NP(  10,   15, lims=[0,70]), ## 4 -- inverse y scale
+              UP(  -6,    0)]              ## 5 -- glo10 white noise
 
     def _define_kernel(self):
         pv = self._pv
@@ -189,14 +131,14 @@ class QuasiPeriodicKernel(BasicKernel):
     pv0   = array([-6.0, 0.25, 10, 0.01, -5.4, 21, 21, -3])
     ndim  = 3
     npar  = 8
-    priors = [UniformPrior(-6,  1),                    ## 0 Time log10 amplitude
-              LogNormPrior( 0.25, 1.25, lims=[0,2]),   ## 1 Inverse time scale
-              UniformPrior( 0.25, 45),                 ## 2 Period
-              LogNormPrior( 0.25, 1.25, lims=[0,2]),   ## 3 Time Evolution
-              UniformPrior(-6,  0),                    ## 4 XY log10 amplitude
-              NormalPrior( 17, 8, lims=[0,70]),        ## 5 inverse X scale
-              NormalPrior( 17, 8, lims=[0,70]),        ## 6 inverse Y scale
-              UniformPrior(-6,  0)]                    ## 7 White noise
+    priors = [UP(   -6,    1),               ## 0 -- time log10 amplitude
+              LP( 0.25, 1.25, lims=[0,2]),   ## 1 -- inverse time scale
+              UP( 0.25,   45),               ## 2 -- period
+              LP( 0.25, 1.25, lims=[0,2]),   ## 3 -- time Evolution
+              UP(   -6,    0),               ## 4 -- xy log10 amplitude
+              NP(   17,    8, lims=[0,70]),  ## 5 -- inverse x scale
+              NP(   17,    8, lims=[0,70]),  ## 6 -- inverse y scale
+              UP(   -6,    0)]               ## 7 -- log10 white noise
 
     bounds = [[-5,-2],[0.1,1],[0,20],[0.01,1],[-5,-2],[2,50],[2,50],[-4,-2]]
 
@@ -228,14 +170,14 @@ class QuasiPeriodicKernel(BasicKernel):
 class QuasiPeriodicKernelEP(QuasiPeriodicKernel):
     name  = "QuasiPeriodicKernelEP"
     eq    = ''
-    priors = [UniformPrior(-6,  1),                    ## 0 Time log10 amplitude
-              LogNormPrior( 0.25, 1.25, lims=[0,2]),   ## 1 Inverse time scale
-              UniformPrior( 0.25, 45),                 ## 2 Period
-              LogNormPrior( 0.25, 1.25, lims=[0,2]),   ## 3 Time Evolution
-              UniformPrior(-6,  0),                    ## 4 XY log10 amplitude
-              NormalPrior( 10, 15, lims=[0,70]),       ## 5 inverse X scale
-              NormalPrior( 10, 15, lims=[0,70]),       ## 6 inverse Y scale
-              UniformPrior(-6,  0)]                    ## 7 White noise
+    priors = [UP(   -6,    1),               ## 0 -- time log10 amplitude
+              LP( 0.25, 1.25, lims=[0,2]),   ## 1 -- inverse time scale
+              UP( 0.25,   45),               ## 2 -- period
+              LP( 0.25, 1.25, lims=[0,2]),   ## 3 -- time Evolution
+              UP(   -6,    0),               ## 4 -- xy log10 amplitude
+              NP(   10,   15, lims=[0,70]),  ## 5 -- inverse x scale
+              NP(   10,   15, lims=[0,70]),  ## 6 -- inverse y scale
+              UP(   -6,   0)]                ## 7 -- log10 white noise
 
     def _define_kernel(self):
         pv = self._pv
