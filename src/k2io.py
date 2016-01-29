@@ -1,9 +1,24 @@
 """Module for reading K2 data from different sources and writing k2sc FITS files.
-The module contains severals "readers" that can read a file containing a K2 light
-curve, and return a properly initialised K2Data instance. The module also contains
-a writer class for writing FITS files containing the K2 data and the detrending
-time series.
 
+    This module contains severals "readers" that can read a file containing a K2 light
+    curve, and return a properly initialised K2Data instance. The module also contains
+    a writer class for writing FITS files containing the K2 data and the detrending
+    time series.
+
+    Copyright (C) 2016  Suzanne Aigrain
+
+    This program is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 """
 
 import warnings
@@ -102,36 +117,6 @@ class MASTReader(DataReader):
             h = pf.getheader(fname, 1)
             fmt_ok = 'SAP_FLUX' in h.values()
             return fmt_ok
-        
-# class smearReader(DataReader):
-#     extensions = ['.fits', '.csv']
-#     ndatasets = 1
-#     fn_out_template = 'hr1185.fits'
-
-#     @classmethod
-#     def read(cls, fname):
-#         epic = 200000000
-#         data = pf.getdata(fname, 1)
-#         head = pf.PrimaryHDU().header#pf.getheader(fname, 0)
-#         return K2Data(epic,
-#                       time=data['BJD'],
-#                       cadence=data['CAD'],
-#                       quality=data['QUALITY'],
-#                       fluxes=data['SAP_FLUX'],
-#                       errors=data['SAP_FLUX_ERR'],
-#                       x=data['POS_CORR1'],
-#                       y=data['POS_CORR2'],
-#                       sap_header=head)    
-    
-#     @classmethod
-#     def can_read(cls, fname):
-#         ext_ok = cls.is_extension_valid(fname)
-#         if not ext_ok:
-#             return False
-#         else:
-#             h = pf.getheader(fname, 1)
-#             fmt_ok = 'BJD' in h.values()
-#             return fmt_ok
         
 
 class SPLOXReader(DataReader):
