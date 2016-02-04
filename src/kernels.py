@@ -27,7 +27,9 @@ from george.kernels import ExpSquaredKernel as ESK
 from george.kernels import ExpSine2Kernel as ESn2K
 from george.kernels import ExpKernel as EK
 
-from priors import UniformPrior, NormalPrior, LogNormPrior as UP, NP, LP
+from priors import UniformPrior as UP
+from priors import NormalPrior  as NP
+from priors import LogNormPrior as LP
 
 class DtKernel(object):
     names  = []
@@ -151,7 +153,7 @@ class QuasiPeriodicKernel(BasicKernel):
     npar  = 8
     priors = [UP(   -6,    1),               ## 0 -- time log10 amplitude
               LP( 0.25, 1.25, lims=[0,2]),   ## 1 -- inverse time scale
-              UP( 0.25,   45),               ## 2 -- period
+              UP( 0.04,   45),               ## 2 -- period
               LP( 0.25, 1.25, lims=[0,2]),   ## 3 -- time Evolution
               UP(   -6,    0),               ## 4 -- xy log10 amplitude
               NP(   17,    8, lims=[0,70]),  ## 5 -- inverse x scale
