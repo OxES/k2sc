@@ -62,7 +62,7 @@ class DataReader(object):
         
 class AMCReader(DataReader):
     extensions = ['.bin', '.dat']
-    ndatasets = 2  
+    ndatasets = None  
     fn_out_template = 'EPIC_{:9d}_amc.fits'
 
     @classmethod
@@ -72,18 +72,19 @@ class AMCReader(DataReader):
         return K2Data(epic,
                       time=data[:,0],
                       cadence=data[:,1],
-                      quality=data[:,8],
-                      fluxes=data[:,[2,4]].T,
-                      errors=data[:,[3,5]].T,
-                      x=data[:,6],
-                      y=data[:,7])
+                      quality=data[:,-1],
+                      fluxes=data[:,2:-3:2].T,
+                      errors=data[:,3:-3:2].T,
+                      x=data[:,-3],
+                      y=data[:,-2])
 
     @classmethod
     def can_read(cls, fname):
         ext_ok = cls.is_extension_valid(fname)
         with open(fname) as f:
-            fmt_ok = len(f.readline().split()) == 9
-        return ext_ok and fmt_ok
+            header = f.readline().lower().split()
+            head_ok = all([cn in header for cn in 'dates cadences xpos ypos quality'.split()])
+        return ext_ok and head_ok
     
     
 class MASTReader(DataReader):
