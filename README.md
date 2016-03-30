@@ -12,7 +12,7 @@ Python package for the K2 systematics correction using Gaussian processes.
 
  - NumPy
  - SciPy
- - PyFITS
+ - astropy
  - George
 
 ## Authors

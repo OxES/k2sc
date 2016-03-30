@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 import math as mt
 import numpy as np
-import pyfits as pf
+import astropy.io.fits as pf
 import pandas as pd
 import seaborn as sb
 import matplotlib.pyplot as pl

@@ -4,7 +4,7 @@ from matplotlib.pyplot import *
 from argparse import ArgumentParser
 
 import math as mt
-import pyfits as pf
+import astropy.io.fits as pf
 rc('figure', figsize=(14,6))
 
 from k2sc.k2io import MASTReader
