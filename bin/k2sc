@@ -9,7 +9,7 @@ import logging
 import math as mt
 import numpy as np
 import scipy as sp
-import pyfits as pf
+import astropy.io.fits as pf
 import matplotlib.pyplot as pl
 
 try:

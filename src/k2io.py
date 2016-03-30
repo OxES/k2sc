@@ -24,7 +24,7 @@
 import warnings
 import numpy as np
 import re
-import pyfits as pf
+import astropy.io.fits as pf
 from os.path import basename, splitext
 from datetime import datetime
 from collections import namedtuple
