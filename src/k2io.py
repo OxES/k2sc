@@ -34,8 +34,6 @@ from k2data import K2Data
 warnings.resetwarnings()
 warnings.filterwarnings('ignore', category=UserWarning, append=True)
 
-pf_version = float(re.findall('^([0-9]\.[0-9])\.*', pf.__version__)[0])
-
 ## ===  READERS  ===
 ## =================
 
@@ -200,11 +198,7 @@ class FITSWriter(object):
                          C(name='trend_t_%d' %(i+1), format='D', array=unpack(dtres[i].tr_time)),
                          C(name='trend_p_%d' %(i+1), format='D', array=unpack(dtres[i].tr_position))])
 
-        if pf_version >= 3.3:
-            hdu = pf.BinTableHDU.from_columns(pf.ColDefs(cols))
-        else:
-            hdu = pf.new_table(cols)
-
+        hdu = pf.BinTableHDU.from_columns(pf.ColDefs(cols))
         hdu.header['extname'] = 'k2_detrend'
         hdu.header['object'] = data.epic
         hdu.header['epic']   = data.epic
