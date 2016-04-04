@@ -1,5 +1,8 @@
 # K2SC
 
+[![Licence](http://img.shields.io/badge/license-GPLv3-blue.svg?style=flat)](http://www.gnu.org/licenses/gpl-3.0.html)
+[![arXiv](http://img.shields.io/badge/arXiv-1603.09167-blue.svg?style=flat)](http://arxiv.org/abs/1603.09167)
+
 Python package for the K2 systematics correction using Gaussian processes.
 
 ## Installation
@@ -38,6 +41,25 @@ where `<files>` is now a list of files to be detrended (for example, `path/to/kt
  - astropy
  - George
  - MPI4Py
+
+Citing
+------
+
+If you use K2SC in your reserach, please cite
+
+    Aigrain, S., Parviainen, H. & Pope, B. (2016, accepted to MNRAS), arXiv:1603.09167
+
+or use this ready-made BibTeX entry
+
+    @article{Aigrain2016,
+        arxivId = {1603.09167},
+        author = {Aigrain, Suzanne and Parviainen, Hannu and Pope, Benjamin},
+        keywords = {data analysis,methods,photometry,planetary systems,techniques},
+        title = {{K2SC: Flexible systematics correction and detrending of K2 light curves using Gaussian Process regression}},
+        url = {http://arxiv.org/abs/1603.09167},
+        year = {2016}
+    }
+
 
 ## Authors
 
