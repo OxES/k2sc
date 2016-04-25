@@ -369,7 +369,7 @@ if __name__ == '__main__':
         if reader is None:
             logger.critical("Unrecognized input file type for file {:s}".format(args.files[0]))
             exit()
-        infile = args.files[args.start_i]
+        infile = files[args.start_i]
         sid = 0
         all_items = files[args.start_i:args.end_i]
 
