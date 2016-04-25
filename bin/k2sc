@@ -34,6 +34,7 @@ from time import time, sleep
 from datetime import datetime
 from os.path import join, exists, abspath, basename
 from argparse import ArgumentParser
+from glob import glob
 
 from k2sc.core import *
 from k2sc.detrender import Detrender
