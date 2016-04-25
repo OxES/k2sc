@@ -339,14 +339,16 @@ if __name__ == '__main__':
 
     ## Select data reader
     ## NOTE: We don't allow mixed input types per run
-    reader = select_reader(args.files[0])
-
-    if reader is None:
-        logger.critical("Unrecognized input file type for file {:s}".format(args.files[0]))
-        exit()
     
     if args.data_dir is None:
-    ## Check if we're dealing with a single input file with many stars
+
+        reader = select_reader(args.files[0])
+
+        if reader is None:
+            logger.critical("Unrecognized input file type for file {:s}".format(args.files[0]))
+            exit()
+
+        ## Check if we're dealing with a single input file with many stars
         if len(args.files) == 1 and issubclass(reader, SPLOXReader):
             singlefile = True
             infile = args.files[0]
@@ -361,6 +363,11 @@ if __name__ == '__main__':
     else:
         singlefile = False 
         files = map(abspath, sorted(glob(join(args.data_dir,'*.fits'))))
+        reader = select_reader(files[0])
+
+        if reader is None:
+            logger.critical("Unrecognized input file type for file {:s}".format(args.files[0]))
+            exit()
         infile = args.files[args.start_i]
         sid = 0
         all_items = files[args.start_i:args.end_i]
