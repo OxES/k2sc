@@ -205,7 +205,7 @@ def detrend(dataset):
                                           args.ls_min_period, args.ls_max_period)
         ## Hyperparameter optimisation
         ## ---------------------------
-        if np.isfinite(ds.fluxes[iset]).sum() > 50:
+        if np.isfinite(ds.fluxes[iset]).sum() >= 100:
             ## Global hyperparameter optimisation
             ## ----------------------------------
             info('Starting global hyperparameter optimisation using DE')
