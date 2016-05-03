@@ -186,8 +186,8 @@ class FITSWriter(object):
         C = pf.Column
         
         cols = [C(name='time',     format='D', array=unpack(data.time)),
-                C(name='cadence',  format='I', array=unpack(data.cadence)),
-                C(name='quality',  format='I', array=unpack(data.quality)),
+                C(name='cadence',  format='J', array=unpack(data.cadence)),
+                C(name='quality',  format='J', array=unpack(data.quality)),
                 C(name='x',        format='D', array=unpack(data.x)),
                 C(name='y',        format='D', array=unpack(data.y))]
 
