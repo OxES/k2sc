@@ -128,6 +128,8 @@ def detrend(dataset):
         ## ------------------------
         info('Starting initial outlier detection')
         fmask  = isfinite(cflux)
+        masks.append(fmask)
+
         omask  = fmask.copy()
         i, nm  = 0, None
         while nm != omask.sum() and i<10:
@@ -135,29 +137,32 @@ def detrend(dataset):
             _, sigma = medsig(cflux[omask])
             omask[fmask] &= (cflux[fmask] < 1+5*sigma) & (cflux[fmask] > 1-5*sigma)
             i += 1
-        masks.append(fmask)
         ofrac = (~omask).sum() / omask.size
         if ofrac < 0.25:
             masks[-1] &= omask
-            info('  Flagged %i (%4.1f%%) outliers.', (~omask).sum(), ofrac)
+            info('  Flagged %i (%4.1f%%) outliers.', (~omask).sum(), 100*ofrac)
         else:
-            info('  Found %i (%4.1f%%) outliers. Not flagging..', (~omask).sum(), ofrac)
-
+            info('  Found %i (%4.1f%%) outliers. Not flagging.', (~omask).sum(), 100*ofrac)
+        
 
         ## Lomb-Scargle period search
         ## --------------------------
-        info('Starting Lomb-Scargle period search')
-        mask  = masks[-1]
-        nflux = flux - ptrend + nanmedian(ptrend)
-        ntime = ds.time - ds.time.mean()
-        pflux = np.poly1d(np.polyfit(ntime[mask], nflux[mask], 9))(ntime)
-        period, fap = psearch(ds.time[mask], (nflux-pflux)[mask], args.ls_min_period, args.ls_max_period)
+        if ofrac < 0.9:
+            info('Starting Lomb-Scargle period search')
+            mask  = masks[-1]
+            nflux = flux - ptrend + nanmedian(ptrend)
+            ntime = ds.time - ds.time.mean()
+            pflux = np.poly1d(np.polyfit(ntime[mask], nflux[mask], 9))(ntime)
+
+            period, fap = psearch(ds.time[mask], (nflux-pflux)[mask], args.ls_min_period, args.ls_max_period)
         
-        if fap < 1e-50:
-            ds.is_periodic = True
-            ds.ls_fap    = fap
-            ds.ls_period = period
-        
+            if fap < 1e-50:
+                ds.is_periodic = True
+                ds.ls_fap    = fap
+                ds.ls_period = period
+        else:
+            info('Too many outliers, skipping the Lomb-Scargle period search')
+
     ## Kernel selection
     ## ----------------
     if args.kernel:
@@ -186,6 +191,7 @@ def detrend(dataset):
             logger.name = 'Worker {:d} <{:d}-{:d}>'.format(mpi_rank, dataset.epic, iset+1)
         np.random.seed(args.seed)
         tstart = time()
+        
         inputs = np.transpose([ds.time,ds.x,ds.y])
         detrender = Detrender(ds.fluxes[iset], inputs, mask=masks[iset],
                               splits=splits, kernel=kernel, tr_nrandom=args.tr_nrandom,
@@ -197,71 +203,82 @@ def detrend(dataset):
         if isinstance(kernel, QuasiPeriodicKernel):
             de._population[:,2] = np.clip(normal(kernel.period, 0.1*kernel.period, size=de.n_pop),
                                           args.ls_min_period, args.ls_max_period)
+        ## Hyperparameter optimisation
+        ## ---------------------------
+        if np.isfinite(ds.fluxes[iset]).sum() > 50:
+            ## Global hyperparameter optimisation
+            ## ----------------------------------
+            info('Starting global hyperparameter optimisation using DE')
+            tstart_de = time()
+            for i,r in enumerate(de(args.de_niter)):
+                info('  DE iteration %3i -ln(L) %4.1f', i, de.minimum_value)
+                tcur_de = time()
+                if ((de._fitness.ptp() < 3) or (tcur_de - tstart_de > args.de_max_time)) and (i>2):
+                    break
+            info('  DE finished in %i seconds', tcur_de-tstart_de)
+            info('  DE minimum found at: %s', np.array_str(de.minimum_location, precision=3, max_line_width=250))
+            info('  DE -ln(L) %4.1f', de.minimum_value)
 
-        ## Global hyperparameter optimisation
-        ## ----------------------------------
-        info('Starting global hyperparameter optimisation using DE')
-        tstart_de = time()
-        for i,r in enumerate(de(args.de_niter)):
-            info('  DE iteration %3i -ln(L) %4.1f', i, de.minimum_value)
-            tcur_de = time()
-            if ((de._fitness.ptp() < 3) or (tcur_de - tstart_de > args.de_max_time)) and (i>2):
-                break
-        info('  DE finished in %i seconds', tcur_de-tstart_de)
-        info('  DE minimum found at: %s', np.array_str(de.minimum_location, precision=3, max_line_width=250))
-        info('  DE -ln(L) %4.1f', de.minimum_value)
+            ## Local hyperparameter optimisation
+            ## ---------------------------------
+            info('Starting local hyperparameter optimisation')
+            try:
+                with warnings.catch_warnings():
+                    warnings.filterwarnings('ignore', category=RuntimeWarning, append=True)
+                    pv, warn = detrender.train(de.minimum_location)
+            except ValueError as e:
+                logger.error('Local optimiser failed, %s', e)
+                logger.error('Skipping the file')
+                return
+            info('  Local minimum found at: %s', np.array_str(pv, precision=3))
 
-        ## Local hyperparameter optimisation
-        ## ---------------------------------
-        info('Starting local hyperparameter optimisation')
-        try:
-            with warnings.catch_warnings():
-                warnings.filterwarnings('ignore', category=RuntimeWarning, append=True)
-                pv, warn = detrender.train(de.minimum_location)
-        except ValueError as e:
-            logger.error('Local optimiser failed, %s', e)
-            logger.error('Skipping the file')
-            return
-        info('  Local minimum found at: %s', np.array_str(pv, precision=3))
+            ## Trend computation
+            ## -----------------
+            (mt,tt),(mp,tp) = map(lambda a: (nanmedian(a), a-nanmedian(a)), detrender.predict(pv, components=True))
 
-        ## Trend computation
-        ## -----------------
-        (mt,tt),(mp,tp) = map(lambda a: (nanmedian(a), a-nanmedian(a)), detrender.predict(pv, components=True))
+            ## Iterative sigma-clipping
+            ## ------------------------
+            info('Starting final outlier detection')
+            flux = detrender.data.unmasked_flux
+            cflux = flux-tp-tt
+            cflux /= nanmedian(cflux)
 
-        ## Iterative sigma-clipping
-        ## ------------------------
-        info('Starting final outlier detection')
-        flux = detrender.data.unmasked_flux
-        cflux = flux-tp-tt
-        cflux /= nanmedian(cflux)
+            fmask = isfinite(cflux)
+            mhigh = zeros_like(fmask)
+            mlow  = zeros_like(fmask)
+            mask  = fmask.copy()
+            i, nm = 0, None
+            while nm != mask.sum() and i<10:
+                nm = mask.sum()
+                _, sigma = medsig(cflux[mask])
+                mhigh[fmask] = cflux[fmask] > 1+5*sigma
+                mlow[fmask]  = cflux[fmask] < 1-5*sigma
+                mask &= fmask & (~mlow) & (~mhigh)
+                i += 1
+            ds.mflags[iset][~fmask] |= M_NOTFINITE
+            ds.mflags[iset][mhigh]  |= M_OUTLIER_U
+            ds.mflags[iset][mlow]   |= M_OUTLIER_D
 
-        fmask = isfinite(cflux)
-        mhigh = zeros_like(fmask)
-        mlow  = zeros_like(fmask)
-        mask  = fmask.copy()
-        i, nm = 0, None
-        while nm != mask.sum() and i<10:
-            nm = mask.sum()
-            _, sigma = medsig(cflux[mask])
-            mhigh[fmask] = cflux[fmask] > 1+5*sigma
-            mlow[fmask]  = cflux[fmask] < 1-5*sigma
-            mask &= fmask & (~mlow) & (~mhigh)
-            i += 1
-        ds.mflags[iset][~fmask] |= M_NOTFINITE
-        ds.mflags[iset][mhigh]  |= M_OUTLIER_U
-        ds.mflags[iset][mlow]   |= M_OUTLIER_D
-        
-        info('  %5i too high', mhigh.sum())
-        info('  %5i too low',  mlow.sum())
-        info('  %5i not finite', (~fmask).sum())
+            info('  %5i too high', mhigh.sum())
+            info('  %5i too low',  mlow.sum())
+            info('  %5i not finite', (~fmask).sum())
 
-        ## Detrending and CDPP computation
-        ## -------------------------------
-        info('Computing time and position trends')
-        dd = detrender.data
-        cdpp_r = cdpp(dd.masked_time,   dd.masked_flux)
-        cdpp_t = cdpp(dd.unmasked_time, dd.unmasked_flux-tp,    exclude=~dd.mask)
-        cdpp_c = cdpp(dd.unmasked_time, dd.unmasked_flux-tp-tt, exclude=~dd.mask)
+            ## Detrending and CDPP computation
+            ## -------------------------------
+            info('Computing time and position trends')
+            dd = detrender.data
+            cdpp_r = cdpp(dd.masked_time,   dd.masked_flux)
+            cdpp_t = cdpp(dd.unmasked_time, dd.unmasked_flux-tp,    exclude=~dd.mask)
+            cdpp_c = cdpp(dd.unmasked_time, dd.unmasked_flux-tp-tt, exclude=~dd.mask)
+        else:
+            info('Skipping dataset %i, not enough finite datapoints')
+            cdpp_r, cdpp_t, cdpp_c, warn = -1, -1, -1, -1
+            mt, mp = np.nan, np.nan
+            tt = np.full_like(detrender.data.unmasked_flux, np.nan)
+            tp = np.full_like(detrender.data.unmasked_flux, np.nan)
+            pv = np.full(kernel.npar, np.nan)
+            detrender.tr_pv = pv.copy()            
+
         results.append(Result(detrender, pv, tt+mt, tp+mp, cdpp_r, cdpp_t, cdpp_c, warn))
         info('  CDPP - raw - %6.3f', cdpp_r)
         info('  CDPP - position component removed - %6.3f', cdpp_t)
