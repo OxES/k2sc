@@ -1,0 +1,4 @@
+.dropbox.attr
+build
+*~
+*.ipynb_checkpoints*
