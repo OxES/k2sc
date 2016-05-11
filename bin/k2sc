@@ -11,6 +11,7 @@ import numpy as np
 import scipy as sp
 import astropy.io.fits as pf
 import matplotlib.pyplot as pl
+from glob import glob
 
 try:
     from mpi4py import MPI
@@ -387,7 +388,7 @@ if __name__ == '__main__':
         infile = files[args.start_i]
         sid = 0
         all_items = files[args.start_i:args.end_i]
-        
+
     items = copy(all_items)
     n_items = len(items)
 
