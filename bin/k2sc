@@ -359,7 +359,10 @@ if __name__ == '__main__':
     ## NOTE: We don't allow mixed input types per run
     if args.data_dir is None:
 
-        reader = select_reader(args.files[0])
+        try:
+            reader = select_reader(args.files[0])
+        except:
+            reader = select_reader(args.files[0])
 
         if reader is None:
             logger.critical("Unrecognized input file type for file {:s}".format(args.files[0]))
