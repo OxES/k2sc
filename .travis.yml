@@ -15,4 +15,4 @@ install:
 script: nosetests -w tests/unit_tests
 
 after_success:
-  - coveralls
+  - coveralls 
