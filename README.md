@@ -1,9 +1,9 @@
-# K2SC
+# *K2* *S*ystematics *C*orrection
 
 [![Licence](http://img.shields.io/badge/license-GPLv3-blue.svg?style=flat)](http://www.gnu.org/licenses/gpl-3.0.html)
 [![arXiv](http://img.shields.io/badge/arXiv-1603.09167-blue.svg?style=flat)](http://arxiv.org/abs/1603.09167)
 
-Python package for the K2 systematics correction using Gaussian processes.
+Python package for K2 systematics correction using Gaussian processes.
 
 ## Installation
 

@@ -11,6 +11,7 @@ import numpy as np
 import scipy as sp
 import astropy.io.fits as pf
 import matplotlib.pyplot as pl
+from glob import glob
 
 try:
     from mpi4py import MPI
@@ -282,7 +283,8 @@ if __name__ == '__main__':
     gfd = ap.add_argument_group('Flare detection', description='Options to control the detection and masking of flares')
     god = ap.add_argument_group('Outlier detection')
     gde = ap.add_argument_group('Global optimisation', description='Options to control the global hyperparameter optimisation')
-    ap.add_argument('files', metavar = 'F', type=str, nargs='*', help='Input light curve file name.')
+    ap.add_argument('--files', metavar = 'F', type=str, nargs='*', help='Input light curve file name.')
+    ap.add_argument('--data-dir', default=None, type=str)   
     ap.add_argument('-c', '--campaign', metavar='C', type=int, help='Campaign number')
     ap.add_argument('--splits', default=None, type=lambda s:fromstring(s.strip('[]'), sep=','), help='List of time values for kernel splits')
     ap.add_argument('--quiet', action='store_true', default=False, help='suppress messages')
@@ -337,23 +339,38 @@ if __name__ == '__main__':
 
     ## Select data reader
     ## NOTE: We don't allow mixed input types per run
-    reader = select_reader(args.files[0])
+    if args.data_dir is None:
 
-    if reader is None:
-        logger.critical("Unrecognized input file type for file {:s}".format(args.files[0]))
-        exit()
-                
-    ## Check if we're dealing with a single input file with many stars
-    if len(args.files) == 1 and issubclass(reader, SPLOXReader):
-        singlefile = True
-        infile = args.files[0]
-        sid = args.start_i
-        all_items = range(args.start_i, min(args.end_i or 1e8, reader.nstars(args.files[0])))
+        reader = select_reader(args.files[0])
+
+        if reader is None:
+            logger.critical("Unrecognized input file type for file {:s}".format(args.files[0]))
+            exit()
+
+        ## Check if we're dealing with a single input file with many stars
+        if len(args.files) == 1 and issubclass(reader, SPLOXReader):
+            singlefile = True
+            infile = args.files[0]
+            sid = args.start_i
+            all_items = range(args.start_i, min(args.end_i or 1e8, reader.nstars(args.files[0])))
+        else:
+            singlefile = False
+            infile = args.files[args.start_i]
+            sid = 0
+            all_items = args.files[args.start_i:args.end_i]
+
     else:
-        singlefile = False
-        infile = args.files[args.start_i]
+        singlefile = False 
+        files = map(abspath, sorted(glob(join(args.data_dir,'*.fits'))))
+        reader = select_reader(files[0])
+
+        if reader is None:
+            logger.critical("Unrecognized input file type for file {:s}".format(args.files[0]))
+            exit()
+        infile = files[args.start_i]
         sid = 0
-        all_items = args.files[args.start_i:args.end_i]
+        all_items = files[args.start_i:args.end_i]
+
     items = copy(all_items)
     n_items = len(items)
 
