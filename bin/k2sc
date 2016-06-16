@@ -42,7 +42,7 @@ from k2sc.k2io import select_reader, FITSWriter, SPLOXReader
 from k2sc.cdpp import cdpp
 from k2sc.de import DiffEvol
 from k2sc.ls import fasper
-from k2sc.utils import medsig
+from k2sc.utils import medsig, sigma_clip
 
 warnings.resetwarnings()
 warnings.filterwarnings('ignore', category=UserWarning, append=True)
@@ -54,9 +54,11 @@ warnings.filterwarnings('ignore', category=DeprecationWarning, append=True)
 mpi_root = 0
 logging.basicConfig(level=logging.DEBUG, format='%(levelname)s %(name)s: %(message)s')
 
-def nanmedian(a):
-    return np.median(a[isfinite(a)])
-
+if hasattr(numpy, 'nanmedian'):
+    from numpy import nanmedian
+else:
+    def nanmedian(a):
+        return np.median(a[isfinite(a)])
 
 def psearch(time, flux, min_p, max_p):
     freq,power,nout,jmax,prob = fasper(time, flux, 6, 0.5)
@@ -127,23 +129,14 @@ def detrend(dataset):
         ## Iterative sigma-clipping
         ## ------------------------
         info('Starting initial outlier detection')
-        fmask  = isfinite(cflux)
-        masks.append(fmask)
-
-        omask  = fmask.copy()
-        i, nm  = 0, None
-        while nm != omask.sum() and i<10:
-            nm = omask.sum()
-            _, sigma = medsig(cflux[omask])
-            omask[fmask] &= (cflux[fmask] < 1+5*sigma) & (cflux[fmask] > 1-5*sigma)
-            i += 1
+        masks.append(isfinite(cflux))
+        omask = sigma_clip(cflux, max_iter=10, max_sigma=5)
         ofrac = (~omask).sum() / omask.size
         if ofrac < 0.25:
             masks[-1] &= omask
             info('  Flagged %i (%4.1f%%) outliers.', (~omask).sum(), 100*ofrac)
         else:
             info('  Found %i (%4.1f%%) outliers. Not flagging.', (~omask).sum(), 100*ofrac)
-        
 
         ## Lomb-Scargle period search
         ## --------------------------
@@ -205,7 +198,7 @@ def detrend(dataset):
                                           args.ls_min_period, args.ls_max_period)
         ## Hyperparameter optimisation
         ## ---------------------------
-        if np.isfinite(ds.fluxes[iset]).sum() > 50:
+        if np.isfinite(ds.fluxes[iset]).sum() >= 100:
             ## Global hyperparameter optimisation
             ## ----------------------------------
             info('Starting global hyperparameter optimisation using DE')
@@ -243,25 +236,14 @@ def detrend(dataset):
             cflux = flux-tp-tt
             cflux /= nanmedian(cflux)
 
-            fmask = isfinite(cflux)
-            mhigh = zeros_like(fmask)
-            mlow  = zeros_like(fmask)
-            mask  = fmask.copy()
-            i, nm = 0, None
-            while nm != mask.sum() and i<10:
-                nm = mask.sum()
-                _, sigma = medsig(cflux[mask])
-                mhigh[fmask] = cflux[fmask] > 1+5*sigma
-                mlow[fmask]  = cflux[fmask] < 1-5*sigma
-                mask &= fmask & (~mlow) & (~mhigh)
-                i += 1
-            ds.mflags[iset][~fmask] |= M_NOTFINITE
+            minf, mlow, mhigh = sigma_clip(cflux, max_iter=10, max_sigma=5, separate_masks=True)
+            ds.mflags[iset][~minf]  |= M_NOTFINITE
             ds.mflags[iset][mhigh]  |= M_OUTLIER_U
             ds.mflags[iset][mlow]   |= M_OUTLIER_D
 
             info('  %5i too high', mhigh.sum())
             info('  %5i too low',  mlow.sum())
-            info('  %5i not finite', (~fmask).sum())
+            info('  %5i not finite', (~minf).sum())
 
             ## Detrending and CDPP computation
             ## -------------------------------
@@ -309,7 +291,7 @@ if __name__ == '__main__':
     ap.add_argument('--end-i', default=None, type=int)
     ap.add_argument('--seed', default=0, type=int)
     ap.add_argument('--logfile', default='', type=str)
-    ap.add_argument('--flux-type', default='sap', type=str)
+    ap.add_argument('--flux-type', default='pdc', type=str)
     ap.add_argument('--default-position-kernel', choices=['SqrExp','Exp'], default='SqrExp')
     ap.add_argument('--kernel', choices=kernels.keys(), default=None)
     ap.add_argument('--kernel-period', type=float, default=None)
