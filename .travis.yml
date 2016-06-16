@@ -9,6 +9,7 @@ addons:
     packages:
     - gfortran
     - python-pip
+    - libeigen3-dev
 
 before_install:
   - pip install george
