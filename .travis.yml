@@ -10,6 +10,8 @@ addons:
     - gfortran
     - python-pip
     - libeigen3-dev
+    - python-numpy
+    - python-scipy
 
 before_install:
   - pip install george
