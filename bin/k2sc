@@ -55,11 +55,11 @@ warnings.filterwarnings('ignore', category=DeprecationWarning, append=True)
 mpi_root = 0
 logging.basicConfig(level=logging.DEBUG, format='%(levelname)s %(name)s: %(message)s')
 
-if hasattr(numpy, 'nanmedian'):
-    from numpy import nanmedian
-else:
-    def nanmedian(a):
-        return np.median(a[isfinite(a)])
+#if hasattr(numpy, 'nanmedian'):
+#    from numpy import nanmedian
+#else:
+def nanmedian(a):
+    return np.median(a[isfinite(a)])
 
 def psearch(time, flux, min_p, max_p):
     freq,power,nout,jmax,prob = fasper(time, flux, 6, 0.5)
