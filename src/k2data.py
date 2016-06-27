@@ -62,7 +62,7 @@ class K2Data(object):
         self.nanmask = nm = isfinite(time) & isfinite(x) & isfinite(y)
         self.time = extract(nm, time)
         self.cadence =  extract(nm, cadence)
-        self.quality =  extract(nm, quality).astype(np.int)
+        self.quality =  extract(nm, quality).astype(np.int32)
         self.fluxes = atleast_2d(fluxes)[:,nm]
         self.errors = atleast_2d(errors)[:,nm]
         self.x = extract(nm,x)
@@ -76,7 +76,7 @@ class K2Data(object):
         self.ls_period = None
         self.ls_power = None
 
-        qmask    = all(isfinite(self.fluxes),0) & (self.quality==0)
+        qmask = all(isfinite(self.fluxes),0) & (self.quality==0)
         self.mflags   = zeros([self.nsets, self.npoints], np.uint8)
         self.mflags[:,~qmask] |= M_QUALITY
 

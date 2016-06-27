@@ -117,11 +117,17 @@ def detrend(dataset):
 
     for iset in range(ds.nsets):
         flux = ds.fluxes[iset]
+        mask  = isfinite(flux) 
+        mask &= ~(ds.mflags[iset] & M_PERIODIC).astype(np.bool)  # Apply the transit mask, if any
+        mask &= ~(ds.quality & 2**20).astype(np.bool)            # Mask out the thruster firings
         inputs = np.transpose([ds.time,ds.x,ds.y])
-        detrender = Detrender(flux, inputs, mask=isfinite(flux),
-                            splits=splits, kernel=BasicKernelEP(),
-                            tr_nrandom=args.tr_nrandom,
-                            tr_nblocks=args.tr_nblocks, tr_bspan=args.tr_bspan)
+        masks.append(mask)
+
+        detrender = Detrender(flux, inputs, mask = mask, splits = splits,
+                              kernel = BasicKernelEP(),
+                              tr_nrandom = args.tr_nrandom,
+                              tr_nblocks = args.tr_nblocks,
+                              tr_bspan = args.tr_bspan)
     
         ttrend,ptrend = detrender.predict(detrender.kernel.pv0+1e-5, components=True)
         cflux = flux-ptrend+median(ptrend)-ttrend+median(ttrend)
@@ -130,11 +136,10 @@ def detrend(dataset):
         ## Iterative sigma-clipping
         ## ------------------------
         info('Starting initial outlier detection')
-        masks.append(isfinite(cflux))
         omask = sigma_clip(cflux, max_iter=10, max_sigma=5)
         ofrac = (~omask).sum() / omask.size
         if ofrac < 0.25:
-            masks[-1] &= omask
+            mask &= omask
             info('  Flagged %i (%4.1f%%) outliers.', (~omask).sum(), 100*ofrac)
         else:
             info('  Found %i (%4.1f%%) outliers. Not flagging.', (~omask).sum(), 100*ofrac)
@@ -143,7 +148,6 @@ def detrend(dataset):
         ## --------------------------
         if ofrac < 0.9:
             info('Starting Lomb-Scargle period search')
-            mask  = masks[-1]
             nflux = flux - ptrend + nanmedian(ptrend)
             ntime = ds.time - ds.time.mean()
             pflux = np.poly1d(np.polyfit(ntime[mask], nflux[mask], 9))(ntime)
