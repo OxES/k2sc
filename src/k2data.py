@@ -84,3 +84,6 @@ class K2Data(object):
     def mask_periodic_signal(self, center, period, duration):
         self.pmask = np.abs(fold(self.time, period, center, shift=0.5) - 0.5)*period > 0.5*duration
         self.mflags[:,~self.pmask] |= M_PERIODIC
+
+    #def __str__(self):
+    #    return str(id(self))

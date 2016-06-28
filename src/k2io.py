@@ -68,13 +68,13 @@ class AMCReader(DataReader):
         epic = int(re.findall('EPIC_([0-9]+)_', basename(fname))[0])
         data = np.loadtxt(fname, skiprows=1)
         return K2Data(epic,
-                      time=data[:,0],
-                      cadence=data[:,1],
-                      quality=data[:,-1],
-                      fluxes=data[:,2:-3:2].T,
-                      errors=data[:,3:-3:2].T,
-                      x=data[:,-3],
-                      y=data[:,-2])
+                      time    = data[:,0],
+                      cadence = data[:,1],
+                      quality = data[:,-1],
+                      fluxes  = data[:,2:-3:2].T,
+                      errors  = data[:,3:-3:2].T,
+                      x       = data[:,-3],
+                      y       = data[:,-2])
 
     @classmethod
     def can_read(cls, fname):
@@ -90,10 +90,14 @@ class MASTReader(DataReader):
     ndatasets = 1
     fn_out_template = 'EPIC_{:9d}_mast.fits'
     allowed_types = ['sap', 'pdc']
+    fkeys = dict(sap = 'sap_flux', pdc = 'pdcsap_flux')
 
     @classmethod
     def read(cls, fname, sid, **kwargs):
-        ftype = 'sap_flux' if kwargs.get('type','sap').lower() == 'sap' else 'pdcsap_flux'
+        ftype = kwargs.get('type', 'pdc').lower()
+        assert ftype in cls.allowed_types, 'Flux type must be either `sap` or `pdc`'
+        fkey = cls.fkeys[ftype]
+
         try:
             epic = int(re.findall('ktwo([0-9]+)-c', basename(fname))[0])
         except:
@@ -101,14 +105,14 @@ class MASTReader(DataReader):
         data = pf.getdata(fname, 1)
         head = pf.getheader(fname, 0)
         return K2Data(epic,
-                      time=data['time'],
-                      cadence=data['cadenceno'],
-                      quality=data['sap_quality'],
-                      fluxes=data[ftype],
-                      errors=data[ftype+'_err'],
-                      x=data['pos_corr1'],
-                      y=data['pos_corr2'],
-                      sap_header=head)    
+                      time    = data['time'],
+                      cadence = data['cadenceno'],
+                      quality = data['sap_quality'],
+                      fluxes  = data[fkey],
+                      errors  = data[fkey+'_err'],
+                      x       = data['pos_corr1'],
+                      y       = data['pos_corr2'],
+                      sap_header = head)    
     
     @classmethod
     def can_read(cls, fname):
