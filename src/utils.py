@@ -22,25 +22,25 @@ def medsig(a):
     return med, sig
 
 
-def sigma_clip(a, max_iter=10, max_sigma=5, separate_masks=False):
+def sigma_clip(a, max_iter=10, max_sigma=5, separate_masks=False, mexc=None):
     """Iterative sigma-clipping routine that separates not finite points, and down- and upwards outliers.
     """
-    minf  = isfinite(a)
-    mhigh = ones_like(minf)
-    mlow  = ones_like(minf)
-    mask  = ones_like(minf)
+    mexc  = isfinite(a) if mexc is None else isfinite(a) & mexc
+    mhigh = ones_like(mexc)
+    mlow  = ones_like(mexc)
+    mask  = ones_like(mexc)
 
     i, nm = 0, None
     while (nm != mask.sum()) and (i < max_iter):
-        mask = minf & mhigh & mlow
+        mask = mexc & mhigh & mlow
         nm = mask.sum()
         med, sig = medsig(a[mask])
-        mhigh[minf] = a[minf] - med <  max_sigma*sig
-        mlow[minf]  = a[minf] - med > -max_sigma*sig
+        mhigh[mexc] = a[mexc] - med <  max_sigma*sig
+        mlow[mexc]  = a[mexc] - med > -max_sigma*sig
         i += 1
 
     if separate_masks:
-        return minf, mlow, mhigh
+        return mlow, mhigh
     else:
-        return minf & mlow & mhigh
+        return mlow & mhigh
 

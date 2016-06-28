@@ -120,7 +120,7 @@ def detrend(dataset):
         mask  = isfinite(flux) 
         mask &= ~(ds.mflags[iset] & M_PERIODIC).astype(np.bool)  # Apply the transit mask, if any
         mask &= ~(ds.quality & 2**20).astype(np.bool)            # Mask out the thruster firings
-        inputs = np.transpose([ds.time,ds.x,ds.y])
+        inputs = np.transpose([ds.time, ds.x, ds.y])
         masks.append(mask)
 
         detrender = Detrender(flux, inputs, mask = mask, splits = splits,
@@ -136,7 +136,7 @@ def detrend(dataset):
         ## Iterative sigma-clipping
         ## ------------------------
         info('Starting initial outlier detection')
-        omask = sigma_clip(cflux, max_iter=10, max_sigma=5)
+        omask = mask & sigma_clip(cflux, max_iter=10, max_sigma=5, mexc=mask)
         ofrac = (~omask).sum() / omask.size
         if ofrac < 0.25:
             mask &= omask
@@ -241,13 +241,17 @@ def detrend(dataset):
             cflux = flux-tp-tt
             cflux /= nanmedian(cflux)
 
-            minf, mlow, mhigh = sigma_clip(cflux, max_iter=10, max_sigma=5, separate_masks=True)
-            ds.mflags[iset][~minf]  |= M_NOTFINITE
-            ds.mflags[iset][mhigh]  |= M_OUTLIER_U
-            ds.mflags[iset][mlow]   |= M_OUTLIER_D
+            mper = ~(ds.mflags[iset] & M_PERIODIC).astype(np.bool)  # Apply the transit mask, if any
+            mthf = ~(ds.quality & 2**20).astype(np.bool)            # Mask out the thruster firings
+            minf = np.isfinite(cflux)
 
-            info('  %5i too high', mhigh.sum())
-            info('  %5i too low',  mlow.sum())
+            mlow, mhigh = sigma_clip(cflux, max_iter = 10, max_sigma = 5, separate_masks = True, mexc = mper&mthf)
+            ds.mflags[iset][~minf]  |= M_NOTFINITE
+            ds.mflags[iset][~mhigh]  |= M_OUTLIER_U
+            ds.mflags[iset][~mlow]   |= M_OUTLIER_D
+
+            info('  %5i too high', (~mhigh).sum())
+            info('  %5i too low',  (~mlow).sum())
             info('  %5i not finite', (~minf).sum())
 
             ## Detrending and CDPP computation
