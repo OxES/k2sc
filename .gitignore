@@ -1,3 +1,5 @@
+*.out
+*.pyc
 .dropbox.attr
 build
 *~
