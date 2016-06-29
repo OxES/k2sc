@@ -102,8 +102,13 @@ class MASTReader(DataReader):
             epic = int(re.findall('ktwo([0-9]+)-c', basename(fname))[0])
         except:
             epic = int(re.findall('C([0-9]+)_smear', basename(fname))[0][2:]) # for smear
-        data = pf.getdata(fname, 1)
-        head = pf.getheader(fname, 0)
+        data  = pf.getdata(fname, 1)
+        phead = pf.getheader(fname, 0)
+        dhead = pf.getheader(fname, 1)
+
+        [h.remove('CHECKSUM') for h in (phead,dhead)]
+        [phead.remove(k) for k in 'CREATOR PROCVER FILEVER TIMVERSN'.split()]
+
         return K2Data(epic,
                       time    = data['time'],
                       cadence = data['cadenceno'],
@@ -112,7 +117,8 @@ class MASTReader(DataReader):
                       errors  = data[fkey+'_err'],
                       x       = data['pos_corr1'],
                       y       = data['pos_corr2'],
-                      sap_header = head)    
+                      primary_header = phead,
+                      data_header = dhead)    
     
     @classmethod
     def can_read(cls, fname):
@@ -188,7 +194,6 @@ class FITSWriter(object):
             return arr
 
         C = pf.Column
-        
         cols = [C(name='time',     format='D', array=unpack(data.time)),
                 C(name='cadence',  format='J', array=unpack(data.cadence)),
                 C(name='quality',  format='J', array=unpack(data.quality)),
@@ -196,32 +201,36 @@ class FITSWriter(object):
                 C(name='y',        format='D', array=unpack(data.y))]
 
         for i in range(data.nsets):
-            cols.extend([C(name='flux_%d'    %(i+1), format='D', array=unpack(data.fluxes[i])),
-                         C(name='error_%d'   %(i+1), format='D', array=unpack(data.errors[i])),
-                         C(name='mflags_%d'  %(i+1), format='B', array=unpack(data.mflags[i])),
-                         C(name='trend_t_%d' %(i+1), format='D', array=unpack(dtres[i].tr_time)),
-                         C(name='trend_p_%d' %(i+1), format='D', array=unpack(dtres[i].tr_position))])
+            sid = '' if data.nsets==1 else '_%d' %(i+1)
+            cols.extend([C(name='flux%s'   %sid, format='D', array=unpack(data.fluxes[i])),
+                         C(name='error%s'  %sid, format='D', array=unpack(data.errors[i])),
+                         C(name='mflags%s' %sid, format='B', array=unpack(data.mflags[i])),
+                         C(name='trtime%s' %sid, format='D', array=unpack(dtres[i].tr_time)),
+                         C(name='trposi%s' %sid, format='D', array=unpack(dtres[i].tr_position))])
 
-        hdu = pf.BinTableHDU.from_columns(pf.ColDefs(cols))
-        hdu.header['extname'] = 'k2_detrend'
+        hdu = pf.BinTableHDU.from_columns(pf.ColDefs(cols), header=data.data_header)
+        hdu.header['extname'] = 'K2SC'
         hdu.header['object'] = data.epic
         hdu.header['epic']   = data.epic
         hdu.header['splits'] = str(splits)
         for i in range(data.nsets):
-            hdu.header['cdpp%dr'%(i+1)] = dtres[i].cdpp_r
-            hdu.header['cdpp%dt'%(i+1)] = dtres[i].cdpp_t
-            hdu.header['cdpp%dc'%(i+1)] = dtres[i].cdpp_c
-            hdu.header['ap%d_warn'%(i+1)] = dtres[i].warn
+            sid = '' if data.nsets==1 else i+1
+            hdu.header['cdpp%sr'   %sid] = dtres[i].cdpp_r
+            hdu.header['cdpp%st'   %sid] = dtres[i].cdpp_t
+            hdu.header['cdpp%sc'   %sid] = dtres[i].cdpp_c
+            hdu.header['ap%s_warn' %sid] = dtres[i].warn
         hdu.header['ker_name'] = dtres[0].detrender.kernel.name
         hdu.header['ker_pars'] = ' '.join(dtres[0].detrender.kernel.names)
         hdu.header['ker_eqn']  = dtres[0].detrender.kernel.eq
         for i in range(data.nsets):
             hdu.header['ker_hps%d'%(i+1)] = str(dtres[i].detrender.tr_pv).replace('\n', '')
-        hdu.header['origin'] = 'SPLOX: Stars and Planets at Oxford'
-        hdu.header['program'] = 'k2_syscor v0.8'
-        hdu.header['date']   = datetime.today().strftime('%Y-%m-%dT%H:%M:%S')
+
+        for h in (data.primary_header,hdu.header):
+            h['origin'] = 'SPLOX: Stars and Planets at Oxford'
+            h['program'] = 'k2SC v0.9'
+            h['date']   = datetime.today().strftime('%Y-%m-%dT%H:%M:%S')
         
-        primary_hdu = pf.PrimaryHDU(header=data.sap_header)
+        primary_hdu = pf.PrimaryHDU(header=data.primary_header)
         hdu_list = pf.HDUList([primary_hdu, hdu])
         hdu_list.writeto(fname, clobber=True)
 
