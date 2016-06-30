@@ -57,8 +57,9 @@ class K2Data(object):
                   Lomb-Scargle power of the strongest periodic variability detected
     """
     
-    def __init__(self, epic, time, cadence, quality, fluxes, errors, x, y, primary_header=None, data_header=None):
+    def __init__(self, epic, time, cadence, quality, fluxes, errors, x, y, primary_header=None, data_header=None, campaign=None):
         self.epic = epic
+        self.campaign = campaign
         self.nanmask = nm = isfinite(time) & isfinite(x) & isfinite(y)
         self.time = extract(nm, time)
         self.cadence =  extract(nm, cadence)

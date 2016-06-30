@@ -67,14 +67,16 @@ class AMCReader(DataReader):
     def read(cls, fname, **kwargs):
         epic = int(re.findall('EPIC_([0-9]+)_', basename(fname))[0])
         data = np.loadtxt(fname, skiprows=1)
+
         return K2Data(epic,
-                      time    = data[:,0],
-                      cadence = data[:,1],
-                      quality = data[:,-1],
-                      fluxes  = data[:,2:-3:2].T,
-                      errors  = data[:,3:-3:2].T,
-                      x       = data[:,-3],
-                      y       = data[:,-2])
+                      time     = data[:,0],
+                      cadence  = data[:,1],
+                      quality  = data[:,-1],
+                      fluxes   = data[:,2:-3:2].T,
+                      errors   = data[:,3:-3:2].T,
+                      x        = data[:,-3],
+                      y        = data[:,-2],
+                      campaign = kwargs.get('campaign', None))
 
     @classmethod
     def can_read(cls, fname):
@@ -118,7 +120,8 @@ class MASTReader(DataReader):
                       x       = data['pos_corr1'],
                       y       = data['pos_corr2'],
                       primary_header = phead,
-                      data_header = dhead)    
+                      data_header = dhead,
+                      campaign = phead['campaign'])
     
     @classmethod
     def can_read(cls, fname):
@@ -161,7 +164,8 @@ class SPLOXReader(DataReader):
                       errors=cls._cache.errors[sid,:,:-1],
                       x=cls._cache.x[sid,:-1],
                       y=cls._cache.y[sid,:-1],
-                      sap_header=cls._cache.header)    
+                      sap_header=cls._cache.header,
+                      campaign = kwargs.get('campaign', None))    
 
     
     @classmethod

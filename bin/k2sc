@@ -55,6 +55,8 @@ warnings.filterwarnings('ignore', category=DeprecationWarning, append=True)
 mpi_root = 0
 logging.basicConfig(level=logging.DEBUG, format='%(levelname)s %(name)s: %(message)s')
 
+default_splits = {3:[2154,2190], 4:[2240,2273], 5:[2344], 6:[2390,2428], 7:[2468.5,2515]}
+
 #if hasattr(numpy, 'nanmedian'):
 #    from numpy import nanmedian
 #else:
@@ -103,6 +105,18 @@ def detrend(dataset):
     ## ----------------------------
     ds   = dataset
     info = logger.info
+    error = logger.error
+
+    ## Define the splits
+    ## -----------------
+    if args.splits is None and ds.campaign not in default_splits.keys():
+        error('The campaign not known and no splits given.')
+    elif args.splits:
+        splits = args.splits
+        info('Using split values {:s} given from the command line'.format(str(splits)))
+    else:
+        splits = default_splits[ds.campaign]
+        info('Using default splits {:s} for campaign {:d}'.format(str(splits), ds.campaign))
 
     ## Periodic signal masking
     ## -----------------------
@@ -288,12 +302,11 @@ if __name__ == '__main__':
     ap = ArgumentParser(description='K2SC: K2 systematics correction using Gaussian processes')
     gts = ap.add_argument_group('Training set options')
     gps = ap.add_argument_group('Period search', description='Options to control the initial Lomb-Scargle period search')
-    gfd = ap.add_argument_group('Flare detection', description='Options to control the detection and masking of flares')
     god = ap.add_argument_group('Outlier detection')
     gde = ap.add_argument_group('Global optimisation', description='Options to control the global hyperparameter optimisation')
     ap.add_argument('--files', metavar = 'F', type=str, nargs='*', help='Input light curve file name.')
     ap.add_argument('--data-dir', default=None, type=str)   
-    ap.add_argument('-c', '--campaign', metavar='C', type=int, help='Campaign number')
+    ap.add_argument('-c', '--campaign', metavar='C', type=int, help='Campaign number', default=None)
     ap.add_argument('--splits', default=None, type=lambda s:fromstring(s.strip('[]'), sep=','), help='List of time values for kernel splits')
     ap.add_argument('--quiet', action='store_true', default=False, help='suppress messages')
     ap.add_argument('--save-dir', default='.', help='The directory to save the output file in')
@@ -303,11 +316,11 @@ if __name__ == '__main__':
     ap.add_argument('--logfile', default='', type=str)
     ap.add_argument('--flux-type', default='pdc', type=str)
     ap.add_argument('--default-position-kernel', choices=['SqrExp','Exp'], default='SqrExp')
-    ap.add_argument('--kernel', choices=kernels.keys(), default=None)
-    ap.add_argument('--kernel-period', type=float, default=None)
-    ap.add_argument('--p-mask-center', type=float, default=None)
-    ap.add_argument('--p-mask-period', type=float, default=None)
-    ap.add_argument('--p-mask-duration', type=float, default=None)
+    ap.add_argument('--kernel', choices=kernels.keys(), default=None, help='Kernel to use (overrides the automatic kernel selection)')
+    ap.add_argument('--kernel-period', type=float, default=None, help='Period for the (quasi)periodic kernels (overrides the period detection)')
+    ap.add_argument('--p-mask-center', type=float, default=None, help='Period mask zero epoch')
+    ap.add_argument('--p-mask-period', type=float, default=None, help='Period mask period')
+    ap.add_argument('--p-mask-duration', type=float, default=None, help='Period mask event duration')
     gts.add_argument('--tr-nrandom', default=400, type=int, help='Number of random samples')
     gts.add_argument('--tr-nblocks', default=6, type=int, help='Number of sample blocks')
     gts.add_argument('--tr-bspan', default=50, type=int, help='Span of a single block')
@@ -317,13 +330,9 @@ if __name__ == '__main__':
     gps.add_argument('--ls-max-fap', default=-50, type=float, help='Maximum Lomb-Scargle log10(false alarm) treshold to use the periodic kernel')
     gps.add_argument('--ls-min-period', default=0.05, type=float, help='Minimum period to search for')
     gps.add_argument('--ls-max-period', default=25, type=float, help='Maximum period to search for')
-    gfd.add_argument('--flare-sigma', default=5, type=float)
-    gfd.add_argument('--flare-erosion', default=5, type=int)
     god.add_argument('--outlier-sigma', default=5, type=float)
     god.add_argument('--outlier-mwidth', default=25, type=int)
     args = ap.parse_args()
-
-    csplits = {4: [2240,2273]}
 
     ## Logging
     ##
@@ -335,11 +344,6 @@ if __name__ == '__main__':
             fh.setFormatter(logging.Formatter('%(levelname)s %(name)s: %(message)s'))
             fh.setLevel(logging.DEBUG)
             logger.addHandler(fh)
-
-    if args.splits is None:
-        splits = csplits[args.campaign]
-    else:
-        splits = args.splits
 
     if not exists(args.save_dir):
         logger.error("Error: the save directory {:s} doesn't exists".format(args.save_dir), file=sys.stderr)
@@ -438,7 +442,7 @@ if __name__ == '__main__':
                             logger.warning("The input file {:s} doesn't exists, skipping the file".format(infile))
                             continue
                         
-                    dataset = reader.read(infile, sid=sid, type=args.flux_type)
+                    dataset = reader.read(infile, sid=sid, type=args.flux_type, campaign=args.campaign)
                     comm.send(dataset, dest=w, tag=0)
                     active_workers.append(w)
 
