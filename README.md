@@ -18,7 +18,7 @@ A MAST K2 light curve can be detrended by calling
 
     k2sc <filename>
     
-where `<filename>` is either a MAST light curve filename, list of files, or a directory, `<c>` is the campaign number, and `xxxx,yyyy` define the break points (in time) where the position-dependent systematics change (corresponds to the points of reversal of the roll-angle variation).
+where `<filename>` is either a MAST light curve filename, list of files, or a directory.
 
 ### Useful flags
 
