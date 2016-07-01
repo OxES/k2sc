@@ -20,7 +20,7 @@ warnings.resetwarnings()
 warnings.filterwarnings('ignore', category=UserWarning, append=True)
 
 re_epic = re.compile('EPIC_([0-9]+)_')
-fntemplate = 'hlsp_k2sc_k2_lightcurve_{epic:9d}-c{c:02d}_kepler_v{v:1d}_llc.fits'
+fntemplate = 'hlsp_k2sc_k2_llc_{epic:9d}-c{c:02d}_kepler_v{v:1d}_lc.fits'
 
 def create_series(path, name):
     files = sorted(glob(path))
@@ -54,8 +54,9 @@ if __name__ == '__main__':
             epri.header['origin'] = epdc.header['origin']
             epri.header['creator'] = epdc.header['program']
             epri.header['date'] = t = datetime.today().strftime('%Y-%m-%dT%H:%M:%S')
-            [epri.header.remove(k) for k in 'procver filever timversn checksum'.split()]
+            [epri.header.remove(k) for k in 'procver filever timversn checksum object'.split()]
             for e in (epdc,esap):
+                e.header.remove('object')
                 e.data.flux_1[:] = (e.data.flux_1 
                                     - e.data.trend_p_1 + nanmean(e.data.trend_p_1)
                                     - e.data.trend_t_1 + nanmean(e.data.trend_t_1))
