@@ -14,7 +14,7 @@ setup(name='K2SC',
       package_dir={'k2sc':'src'},
       scripts=['bin/k2sc','bin/k2plot','bin/k2plotmast','bin/k2ginfo', 'bin/k2mastify'],
       packages=['k2sc'],
-      install_requires=["numpy"],
+      install_requires=["numpy", "astropy", "scipy", "george"],
       license='GPLv2',
       classifiers=[
           "Topic :: Scientific/Engineering",

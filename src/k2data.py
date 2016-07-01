@@ -57,17 +57,19 @@ class K2Data(object):
                   Lomb-Scargle power of the strongest periodic variability detected
     """
     
-    def __init__(self, epic, time, cadence, quality, fluxes, errors, x, y, sap_header=None):
+    def __init__(self, epic, time, cadence, quality, fluxes, errors, x, y, primary_header=None, data_header=None, campaign=None):
         self.epic = epic
+        self.campaign = campaign
         self.nanmask = nm = isfinite(time) & isfinite(x) & isfinite(y)
         self.time = extract(nm, time)
         self.cadence =  extract(nm, cadence)
-        self.quality =  extract(nm, quality).astype(np.int)
+        self.quality =  extract(nm, quality).astype(np.int32)
         self.fluxes = atleast_2d(fluxes)[:,nm]
         self.errors = atleast_2d(errors)[:,nm]
         self.x = extract(nm,x)
         self.y = extract(nm,y)
-        self.sap_header = sap_header
+        self.primary_header = primary_header
+        self.data_header = data_header
 
         self.nsets   = self.fluxes.shape[0]
         self.npoints = self.fluxes.shape[1]
@@ -76,7 +78,7 @@ class K2Data(object):
         self.ls_period = None
         self.ls_power = None
 
-        qmask    = all(isfinite(self.fluxes),0) & (self.quality==0)
+        qmask = all(isfinite(self.fluxes),0) & (self.quality==0)
         self.mflags   = zeros([self.nsets, self.npoints], np.uint8)
         self.mflags[:,~qmask] |= M_QUALITY
 
@@ -84,3 +86,6 @@ class K2Data(object):
     def mask_periodic_signal(self, center, period, duration):
         self.pmask = np.abs(fold(self.time, period, center, shift=0.5) - 0.5)*period > 0.5*duration
         self.mflags[:,~self.pmask] |= M_PERIODIC
+
+    #def __str__(self):
+    #    return str(id(self))

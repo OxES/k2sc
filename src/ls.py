@@ -115,7 +115,7 @@ def fasper(x,y,ofac,hifac, MACC=4):
 
   nout   = int(0.5*ofac*hifac*n)
   nfreqt = int(ofac*hifac*n*MACC)   # Size the FFT as next power
-  nfreq  = 64L                      # of 2 above nfreqt.
+  nfreq  = 64                       # of 2 above nfreqt.
 
   while nfreq < nfreqt: 
     nfreq = 2*nfreq
@@ -140,7 +140,7 @@ def fasper(x,y,ofac,hifac, MACC=4):
   ck  = ((x-xmin)*fac) % fndim
   ckk  = (2.0*ck) % fndim
 
-  for j in range(0L, n):
+  for j in range(n):
     __spread__(y[j]-ave,wk1,ndim,ck[j],MACC)
     __spread__(1.0,wk2,ndim,ckk[j],MACC)
 
@@ -154,7 +154,6 @@ def fasper(x,y,ofac,hifac, MACC=4):
   iwk1 = wk1.imag
   rwk2 = wk2.real
   iwk2 = wk2.imag
-  
   df  = 1.0/(xdif*ofac)
   
   #Compute the Lomb value for each frequency

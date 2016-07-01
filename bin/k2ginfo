@@ -4,7 +4,7 @@
 from __future__ import division
 import sys
 import numpy as np
-import pyfits as pf
+import astropy.io.fits as pf
 import pandas as pd
 
 from os.path import join, abspath, basename, exists

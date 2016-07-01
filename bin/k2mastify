@@ -4,7 +4,7 @@ import logging
 import re
 
 import pandas as pd
-import pyfits as pf
+import astropy.io.fits as pf
 
 from argparse import ArgumentParser
 from datetime import datetime

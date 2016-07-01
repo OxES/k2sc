@@ -16,7 +16,7 @@
     along with this program.  If not, see <http://www.gnu.org/licenses/>.
 """
 
-from __future__ import division
+from __future__ import division, absolute_import 
 
 import math as m
 import numpy as np
@@ -27,9 +27,9 @@ from george.kernels import ExpSquaredKernel as ESK
 from george.kernels import ExpSine2Kernel as ESn2K
 from george.kernels import ExpKernel as EK
 
-from priors import UniformPrior as UP
-from priors import NormalPrior  as NP
-from priors import LogNormPrior as LP
+from .priors import UniformPrior as UP
+from .priors import NormalPrior  as NP
+from .priors import LogNormPrior as LP
 
 class DtKernel(object):
     names  = []

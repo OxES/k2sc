@@ -9,8 +9,9 @@ import logging
 import math as mt
 import numpy as np
 import scipy as sp
-import pyfits as pf
+import astropy.io.fits as pf
 import matplotlib.pyplot as pl
+from glob import glob
 
 try:
     from mpi4py import MPI
@@ -32,7 +33,7 @@ from numpy.random import normal
 
 from time import time, sleep
 from datetime import datetime
-from os.path import join, exists, abspath, basename
+from os.path import join, exists, abspath, basename, isdir
 from argparse import ArgumentParser
 
 from k2sc.core import *
@@ -42,7 +43,7 @@ from k2sc.k2io import select_reader, FITSWriter, SPLOXReader
 from k2sc.cdpp import cdpp
 from k2sc.de import DiffEvol
 from k2sc.ls import fasper
-from k2sc.utils import medsig
+from k2sc.utils import medsig, sigma_clip
 
 warnings.resetwarnings()
 warnings.filterwarnings('ignore', category=UserWarning, append=True)
@@ -54,9 +55,13 @@ warnings.filterwarnings('ignore', category=DeprecationWarning, append=True)
 mpi_root = 0
 logging.basicConfig(level=logging.DEBUG, format='%(levelname)s %(name)s: %(message)s')
 
+default_splits = {3:[2154,2190], 4:[2240,2273], 5:[2344], 6:[2390,2428], 7:[2468.5,2515]}
+
+#if hasattr(numpy, 'nanmedian'):
+#    from numpy import nanmedian
+#else:
 def nanmedian(a):
     return np.median(a[isfinite(a)])
-
 
 def psearch(time, flux, min_p, max_p):
     freq,power,nout,jmax,prob = fasper(time, flux, 6, 0.5)
@@ -100,6 +105,18 @@ def detrend(dataset):
     ## ----------------------------
     ds   = dataset
     info = logger.info
+    error = logger.error
+
+    ## Define the splits
+    ## -----------------
+    if args.splits is None and ds.campaign not in default_splits.keys():
+        error('The campaign not known and no splits given.')
+    elif args.splits:
+        splits = args.splits
+        info('Using split values {:s} given from the command line'.format(str(splits)))
+    else:
+        splits = default_splits[ds.campaign]
+        info('Using default splits {:s} for campaign {:d}'.format(str(splits), ds.campaign))
 
     ## Periodic signal masking
     ## -----------------------
@@ -114,11 +131,17 @@ def detrend(dataset):
 
     for iset in range(ds.nsets):
         flux = ds.fluxes[iset]
-        inputs = np.transpose([ds.time,ds.x,ds.y])
-        detrender = Detrender(flux, inputs, mask=isfinite(flux),
-                            splits=splits, kernel=BasicKernelEP(),
-                            tr_nrandom=args.tr_nrandom,
-                            tr_nblocks=args.tr_nblocks, tr_bspan=args.tr_bspan)
+        mask  = isfinite(flux) 
+        mask &= ~(ds.mflags[iset] & M_PERIODIC).astype(np.bool)  # Apply the transit mask, if any
+        mask &= ~(ds.quality & 2**20).astype(np.bool)            # Mask out the thruster firings
+        inputs = np.transpose([ds.time, ds.x, ds.y])
+        masks.append(mask)
+
+        detrender = Detrender(flux, inputs, mask = mask, splits = splits,
+                              kernel = BasicKernelEP(),
+                              tr_nrandom = args.tr_nrandom,
+                              tr_nblocks = args.tr_nblocks,
+                              tr_bspan = args.tr_bspan)
     
         ttrend,ptrend = detrender.predict(detrender.kernel.pv0+1e-5, components=True)
         cflux = flux-ptrend+median(ptrend)-ttrend+median(ttrend)
@@ -127,37 +150,31 @@ def detrend(dataset):
         ## Iterative sigma-clipping
         ## ------------------------
         info('Starting initial outlier detection')
-        fmask  = isfinite(cflux)
-        omask  = fmask.copy()
-        i, nm  = 0, None
-        while nm != omask.sum() and i<10:
-            nm = omask.sum()
-            _, sigma = medsig(cflux[omask])
-            omask[fmask] &= (cflux[fmask] < 1+5*sigma) & (cflux[fmask] > 1-5*sigma)
-            i += 1
-        masks.append(fmask)
+        omask = mask & sigma_clip(cflux, max_iter=10, max_sigma=5, mexc=mask)
         ofrac = (~omask).sum() / omask.size
         if ofrac < 0.25:
-            masks[-1] &= omask
-            info('  Flagged %i (%4.1f%%) outliers.', (~omask).sum(), ofrac)
+            mask &= omask
+            info('  Flagged %i (%4.1f%%) outliers.', (~omask).sum(), 100*ofrac)
         else:
-            info('  Found %i (%4.1f%%) outliers. Not flagging..', (~omask).sum(), ofrac)
-
+            info('  Found %i (%4.1f%%) outliers. Not flagging.', (~omask).sum(), 100*ofrac)
 
         ## Lomb-Scargle period search
         ## --------------------------
-        info('Starting Lomb-Scargle period search')
-        mask  = masks[-1]
-        nflux = flux - ptrend + nanmedian(ptrend)
-        ntime = ds.time - ds.time.mean()
-        pflux = np.poly1d(np.polyfit(ntime[mask], nflux[mask], 9))(ntime)
-        period, fap = psearch(ds.time[mask], (nflux-pflux)[mask], args.ls_min_period, args.ls_max_period)
+        if ofrac < 0.9:
+            info('Starting Lomb-Scargle period search')
+            nflux = flux - ptrend + nanmedian(ptrend)
+            ntime = ds.time - ds.time.mean()
+            pflux = np.poly1d(np.polyfit(ntime[mask], nflux[mask], 9))(ntime)
+
+            period, fap = psearch(ds.time[mask], (nflux-pflux)[mask], args.ls_min_period, args.ls_max_period)
         
-        if fap < 1e-50:
-            ds.is_periodic = True
-            ds.ls_fap    = fap
-            ds.ls_period = period
-        
+            if fap < 1e-50:
+                ds.is_periodic = True
+                ds.ls_fap    = fap
+                ds.ls_period = period
+        else:
+            info('Too many outliers, skipping the Lomb-Scargle period search')
+
     ## Kernel selection
     ## ----------------
     if args.kernel:
@@ -186,6 +203,7 @@ def detrend(dataset):
             logger.name = 'Worker {:d} <{:d}-{:d}>'.format(mpi_rank, dataset.epic, iset+1)
         np.random.seed(args.seed)
         tstart = time()
+        
         inputs = np.transpose([ds.time,ds.x,ds.y])
         detrender = Detrender(ds.fluxes[iset], inputs, mask=masks[iset],
                               splits=splits, kernel=kernel, tr_nrandom=args.tr_nrandom,
@@ -197,71 +215,75 @@ def detrend(dataset):
         if isinstance(kernel, QuasiPeriodicKernel):
             de._population[:,2] = np.clip(normal(kernel.period, 0.1*kernel.period, size=de.n_pop),
                                           args.ls_min_period, args.ls_max_period)
+        ## Hyperparameter optimisation
+        ## ---------------------------
+        if np.isfinite(ds.fluxes[iset]).sum() >= 100:
+            ## Global hyperparameter optimisation
+            ## ----------------------------------
+            info('Starting global hyperparameter optimisation using DE')
+            tstart_de = time()
+            for i,r in enumerate(de(args.de_niter)):
+                info('  DE iteration %3i -ln(L) %4.1f', i, de.minimum_value)
+                tcur_de = time()
+                if ((de._fitness.ptp() < 3) or (tcur_de - tstart_de > args.de_max_time)) and (i>2):
+                    break
+            info('  DE finished in %i seconds', tcur_de-tstart_de)
+            info('  DE minimum found at: %s', np.array_str(de.minimum_location, precision=3, max_line_width=250))
+            info('  DE -ln(L) %4.1f', de.minimum_value)
 
-        ## Global hyperparameter optimisation
-        ## ----------------------------------
-        info('Starting global hyperparameter optimisation using DE')
-        tstart_de = time()
-        for i,r in enumerate(de(args.de_niter)):
-            info('  DE iteration %3i -ln(L) %4.1f', i, de.minimum_value)
-            tcur_de = time()
-            if ((de._fitness.ptp() < 3) or (tcur_de - tstart_de > args.de_max_time)) and (i>2):
-                break
-        info('  DE finished in %i seconds', tcur_de-tstart_de)
-        info('  DE minimum found at: %s', np.array_str(de.minimum_location, precision=3, max_line_width=250))
-        info('  DE -ln(L) %4.1f', de.minimum_value)
+            ## Local hyperparameter optimisation
+            ## ---------------------------------
+            info('Starting local hyperparameter optimisation')
+            try:
+                with warnings.catch_warnings():
+                    warnings.filterwarnings('ignore', category=RuntimeWarning, append=True)
+                    pv, warn = detrender.train(de.minimum_location)
+            except ValueError as e:
+                logger.error('Local optimiser failed, %s', e)
+                logger.error('Skipping the file')
+                return
+            info('  Local minimum found at: %s', np.array_str(pv, precision=3))
 
-        ## Local hyperparameter optimisation
-        ## ---------------------------------
-        info('Starting local hyperparameter optimisation')
-        try:
-            with warnings.catch_warnings():
-                warnings.filterwarnings('ignore', category=RuntimeWarning, append=True)
-                pv, warn = detrender.train(de.minimum_location)
-        except ValueError as e:
-            logger.error('Local optimiser failed, %s', e)
-            logger.error('Skipping the file')
-            return
-        info('  Local minimum found at: %s', np.array_str(pv, precision=3))
+            ## Trend computation
+            ## -----------------
+            (mt,tt),(mp,tp) = map(lambda a: (nanmedian(a), a-nanmedian(a)), detrender.predict(pv, components=True))
 
-        ## Trend computation
-        ## -----------------
-        (mt,tt),(mp,tp) = map(lambda a: (nanmedian(a), a-nanmedian(a)), detrender.predict(pv, components=True))
+            ## Iterative sigma-clipping
+            ## ------------------------
+            info('Starting final outlier detection')
+            flux = detrender.data.unmasked_flux
+            cflux = flux-tp-tt
+            cflux /= nanmedian(cflux)
 
-        ## Iterative sigma-clipping
-        ## ------------------------
-        info('Starting final outlier detection')
-        flux = detrender.data.unmasked_flux
-        cflux = flux-tp-tt
-        cflux /= nanmedian(cflux)
+            mper = ~(ds.mflags[iset] & M_PERIODIC).astype(np.bool)  # Apply the transit mask, if any
+            mthf = ~(ds.quality & 2**20).astype(np.bool)            # Mask out the thruster firings
+            minf = np.isfinite(cflux)
 
-        fmask = isfinite(cflux)
-        mhigh = zeros_like(fmask)
-        mlow  = zeros_like(fmask)
-        mask  = fmask.copy()
-        i, nm = 0, None
-        while nm != mask.sum() and i<10:
-            nm = mask.sum()
-            _, sigma = medsig(cflux[mask])
-            mhigh[fmask] = cflux[fmask] > 1+5*sigma
-            mlow[fmask]  = cflux[fmask] < 1-5*sigma
-            mask &= fmask & (~mlow) & (~mhigh)
-            i += 1
-        ds.mflags[iset][~fmask] |= M_NOTFINITE
-        ds.mflags[iset][mhigh]  |= M_OUTLIER_U
-        ds.mflags[iset][mlow]   |= M_OUTLIER_D
-        
-        info('  %5i too high', mhigh.sum())
-        info('  %5i too low',  mlow.sum())
-        info('  %5i not finite', (~fmask).sum())
+            mlow, mhigh = sigma_clip(cflux, max_iter = 10, max_sigma = 5, separate_masks = True, mexc = mper&mthf)
+            ds.mflags[iset][~minf]  |= M_NOTFINITE
+            ds.mflags[iset][~mhigh]  |= M_OUTLIER_U
+            ds.mflags[iset][~mlow]   |= M_OUTLIER_D
 
-        ## Detrending and CDPP computation
-        ## -------------------------------
-        info('Computing time and position trends')
-        dd = detrender.data
-        cdpp_r = cdpp(dd.masked_time,   dd.masked_flux)
-        cdpp_t = cdpp(dd.unmasked_time, dd.unmasked_flux-tp,    exclude=~dd.mask)
-        cdpp_c = cdpp(dd.unmasked_time, dd.unmasked_flux-tp-tt, exclude=~dd.mask)
+            info('  %5i too high', (~mhigh).sum())
+            info('  %5i too low',  (~mlow).sum())
+            info('  %5i not finite', (~minf).sum())
+
+            ## Detrending and CDPP computation
+            ## -------------------------------
+            info('Computing time and position trends')
+            dd = detrender.data
+            cdpp_r = cdpp(dd.masked_time,   dd.masked_flux)
+            cdpp_t = cdpp(dd.unmasked_time, dd.unmasked_flux-tp,    exclude=~dd.mask)
+            cdpp_c = cdpp(dd.unmasked_time, dd.unmasked_flux-tp-tt, exclude=~dd.mask)
+        else:
+            info('Skipping dataset %i, not enough finite datapoints')
+            cdpp_r, cdpp_t, cdpp_c, warn = -1, -1, -1, -1
+            mt, mp = np.nan, np.nan
+            tt = np.full_like(detrender.data.unmasked_flux, np.nan)
+            tp = np.full_like(detrender.data.unmasked_flux, np.nan)
+            pv = np.full(kernel.npar, np.nan)
+            detrender.tr_pv = pv.copy()            
+
         results.append(Result(detrender, pv, tt+mt, tp+mp, cdpp_r, cdpp_t, cdpp_c, warn))
         info('  CDPP - raw - %6.3f', cdpp_r)
         info('  CDPP - position component removed - %6.3f', cdpp_t)
@@ -280,11 +302,10 @@ if __name__ == '__main__':
     ap = ArgumentParser(description='K2SC: K2 systematics correction using Gaussian processes')
     gts = ap.add_argument_group('Training set options')
     gps = ap.add_argument_group('Period search', description='Options to control the initial Lomb-Scargle period search')
-    gfd = ap.add_argument_group('Flare detection', description='Options to control the detection and masking of flares')
     god = ap.add_argument_group('Outlier detection')
     gde = ap.add_argument_group('Global optimisation', description='Options to control the global hyperparameter optimisation')
-    ap.add_argument('files', metavar = 'F', type=str, nargs='*', help='Input light curve file name.')
-    ap.add_argument('-c', '--campaign', metavar='C', type=int, help='Campaign number')
+    ap.add_argument('files', type=str, nargs='*', help='Input light curve file name(s) or the input directory name.')
+    ap.add_argument('-c', '--campaign', metavar='C', type=int, help='Campaign number', default=None)
     ap.add_argument('--splits', default=None, type=lambda s:fromstring(s.strip('[]'), sep=','), help='List of time values for kernel splits')
     ap.add_argument('--quiet', action='store_true', default=False, help='suppress messages')
     ap.add_argument('--save-dir', default='.', help='The directory to save the output file in')
@@ -292,13 +313,13 @@ if __name__ == '__main__':
     ap.add_argument('--end-i', default=None, type=int)
     ap.add_argument('--seed', default=0, type=int)
     ap.add_argument('--logfile', default='', type=str)
-    ap.add_argument('--flux-type', default='sap', type=str)
+    ap.add_argument('--flux-type', default='pdc', type=str)
     ap.add_argument('--default-position-kernel', choices=['SqrExp','Exp'], default='SqrExp')
-    ap.add_argument('--kernel', choices=kernels.keys(), default=None)
-    ap.add_argument('--kernel-period', type=float, default=None)
-    ap.add_argument('--p-mask-center', type=float, default=None)
-    ap.add_argument('--p-mask-period', type=float, default=None)
-    ap.add_argument('--p-mask-duration', type=float, default=None)
+    ap.add_argument('--kernel', choices=kernels.keys(), default=None, help='Kernel to use (overrides the automatic kernel selection)')
+    ap.add_argument('--kernel-period', type=float, default=None, help='Period for the (quasi)periodic kernels (overrides the period detection)')
+    ap.add_argument('--p-mask-center', type=float, default=None, help='Period mask zero epoch')
+    ap.add_argument('--p-mask-period', type=float, default=None, help='Period mask period')
+    ap.add_argument('--p-mask-duration', type=float, default=None, help='Period mask event duration')
     gts.add_argument('--tr-nrandom', default=400, type=int, help='Number of random samples')
     gts.add_argument('--tr-nblocks', default=6, type=int, help='Number of sample blocks')
     gts.add_argument('--tr-bspan', default=50, type=int, help='Span of a single block')
@@ -308,13 +329,9 @@ if __name__ == '__main__':
     gps.add_argument('--ls-max-fap', default=-50, type=float, help='Maximum Lomb-Scargle log10(false alarm) treshold to use the periodic kernel')
     gps.add_argument('--ls-min-period', default=0.05, type=float, help='Minimum period to search for')
     gps.add_argument('--ls-max-period', default=25, type=float, help='Maximum period to search for')
-    gfd.add_argument('--flare-sigma', default=5, type=float)
-    gfd.add_argument('--flare-erosion', default=5, type=int)
     god.add_argument('--outlier-sigma', default=5, type=float)
     god.add_argument('--outlier-mwidth', default=25, type=int)
     args = ap.parse_args()
-
-    csplits = {4: [2240,2273]}
 
     ## Logging
     ##
@@ -327,34 +344,47 @@ if __name__ == '__main__':
             fh.setLevel(logging.DEBUG)
             logger.addHandler(fh)
 
-    if args.splits is None:
-        splits = csplits[args.campaign]
-    else:
-        splits = args.splits
-
     if not exists(args.save_dir):
         logger.error("Error: the save directory {:s} doesn't exists".format(args.save_dir), file=sys.stderr)
         exit(errno.ENOENT)
 
-    ## Select data reader
-    ## NOTE: We don't allow mixed input types per run
-    reader = select_reader(args.files[0])
+    ## Test whether we're dealing with a directory or a list of files and select
+    ## the data reader (NOTE: We don't allow mixed input types per run)
+    ##
+    ## DIRECTORY BRANCH
+    ## ----------------
+    if len(args.files) == 1 and isdir(args.files[0]):
+        singlefile = False 
+        files = map(abspath, sorted(glob(join(args.files[0],'ktwo*.fits'))))
+        reader = select_reader(files[0])
 
-    if reader is None:
-        logger.critical("Unrecognized input file type for file {:s}".format(args.files[0]))
-        exit()
-                
-    ## Check if we're dealing with a single input file with many stars
-    if len(args.files) == 1 and issubclass(reader, SPLOXReader):
-        singlefile = True
-        infile = args.files[0]
-        sid = args.start_i
-        all_items = range(args.start_i, min(args.end_i or 1e8, reader.nstars(args.files[0])))
-    else:
-        singlefile = False
-        infile = args.files[args.start_i]
+        if reader is None:
+            logger.critical("Unrecognized input file type for file {:s}".format(args.files[0]))
+            exit()
+        infile = files[args.start_i]
         sid = 0
-        all_items = args.files[args.start_i:args.end_i]
+        all_items = files[args.start_i:args.end_i]
+
+    ## LIST OF FILES BRANCH
+    ## --------------------
+    else:
+        reader = select_reader(args.files[0])
+        if reader is None:
+            logger.critical("Unrecognized input file type for file {:s}".format(args.files[0]))
+            exit()
+
+        ## Check if we're dealing with a single input file with many stars
+        if len(args.files) == 1 and issubclass(reader, SPLOXReader):
+            singlefile = True
+            infile = args.files[0]
+            sid = args.start_i
+            all_items = range(args.start_i, min(args.end_i or 1e8, reader.nstars(args.files[0])))
+        else:
+            singlefile = False
+            infile = args.files[args.start_i]
+            sid = 0
+            all_items = args.files[args.start_i:args.end_i]
+
     items = copy(all_items)
     n_items = len(items)
 
@@ -414,7 +444,7 @@ if __name__ == '__main__':
                             logger.warning("The input file {:s} doesn't exists, skipping the file".format(infile))
                             continue
                         
-                    dataset = reader.read(infile, sid=sid, type=args.flux_type)
+                    dataset = reader.read(infile, sid=sid, type=args.flux_type, campaign=args.campaign)
                     comm.send(dataset, dest=w, tag=0)
                     active_workers.append(w)
 
