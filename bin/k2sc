@@ -111,7 +111,7 @@ def detrend(dataset):
     ## -----------------
     if args.splits is None and ds.campaign not in default_splits.keys():
         error('The campaign not known and no splits given.')
-    elif args.splits:
+    elif args.splits is not None:
         splits = args.splits
         info('Using split values {:s} given from the command line'.format(str(splits)))
     else:
