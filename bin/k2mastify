@@ -54,7 +54,11 @@ if __name__ == '__main__':
             epri.header['origin'] = epdc.header['origin']
             epri.header['creator'] = epdc.header['program']
             epri.header['date'] = t = datetime.today().strftime('%Y-%m-%dT%H:%M:%S')
-            [epri.header.remove(k) for k in 'procver filever timversn checksum object'.split()]
+
+            for k in 'procver filever timversn checksum object'.split():
+                if k in epri.header.keys():
+                    epri.header.remove(k)
+                    
             for e in (epdc,esap):
                 e.header.remove('object')
                 e.data.flux_1[:] = (e.data.flux_1 
