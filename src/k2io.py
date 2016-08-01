@@ -124,7 +124,7 @@ class MASTReader(DataReader):
                       y       = data['pos_corr2'],
                       primary_header = phead,
                       data_header = dhead,
-                      campaign = campaign])
+                      campaign = campaign)
     
     @classmethod
     def can_read(cls, fname):
