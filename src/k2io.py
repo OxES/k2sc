@@ -107,10 +107,11 @@ class MASTReader(DataReader):
         data  = pf.getdata(fname, 1)
         phead = pf.getheader(fname, 0)
         dhead = pf.getheader(fname, 1)
-
-        [h.remove('CHECKSUM') for h in (phead,dhead)]
-        [phead.remove(k) for k in 'CREATOR PROCVER FILEVER TIMVERSN'.split()]
-
+        try:
+            [h.remove('CHECKSUM') for h in (phead,dhead)]
+            [phead.remove(k) for k in 'CREATOR PROCVER FILEVER TIMVERSN'.split()]
+        except:
+            pass
         return K2Data(epic,
                       time    = data['time'],
                       cadence = data['cadenceno'],
