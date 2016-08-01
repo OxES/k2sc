@@ -110,7 +110,9 @@ class MASTReader(DataReader):
         try:
             [h.remove('CHECKSUM') for h in (phead,dhead)]
             [phead.remove(k) for k in 'CREATOR PROCVER FILEVER TIMVERSN'.split()]
+            campaign = phead['campaign']
         except:
+            campaign = 'C02'
             pass
         return K2Data(epic,
                       time    = data['time'],
@@ -122,7 +124,7 @@ class MASTReader(DataReader):
                       y       = data['pos_corr2'],
                       primary_header = phead,
                       data_header = dhead,
-                      campaign = phead['campaign'])
+                      campaign = campaign])
     
     @classmethod
     def can_read(cls, fname):
