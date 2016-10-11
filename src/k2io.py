@@ -103,7 +103,7 @@ class MASTReader(DataReader):
         try:
             epic = int(re.findall('ktwo([0-9]+)-c', basename(fname))[0])
         except:
-            epic = int(re.findall('C([0-9]+)_smear', basename(fname))[0][2:]) # for smear
+            epic = int(re.findall('C*([0-9]+)_smear', basename(fname))[0]) # for smear
         data  = pf.getdata(fname, 1)
         phead = pf.getheader(fname, 0)
         dhead = pf.getheader(fname, 1)
