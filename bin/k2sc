@@ -441,7 +441,7 @@ if __name__ == '__main__':
                         infile = item
                         logger.info("Processing file %s",abspath(infile))
                         if not exists(infile):
-                            logger.warning("The input file {:s} doesn't exists, skipping the file".format(infile))
+                            logger.warning("The input file {:s} doesn't exist, skipping the file".format(infile))
                             continue
                         
                     dataset = reader.read(infile, sid=sid, type=args.flux_type, campaign=args.campaign)
@@ -472,8 +472,10 @@ if __name__ == '__main__':
                 dataset = comm.recv(source=mpi_root, tag=0)
                 if infile == -1:
                     break
-
-                detrend(dataset)
+                try:
+                    detrend(dataset)
+                except:
+                    logger.warning("Failed to detrend {:s}, skipping.".format(infile))
                 comm.send(dataset.epic, dest=mpi_root, tag=2)    
 
 
