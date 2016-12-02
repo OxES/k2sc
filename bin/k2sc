@@ -355,7 +355,7 @@ if __name__ == '__main__':
     ## ----------------
     if len(args.files) == 1 and isdir(args.files[0]):
         singlefile = False 
-        files = map(abspath, sorted(glob(join(args.files[0],'ktwo*.fits'))))
+        files = map(abspath, sorted(glob(join(args.files[0],'*.fits'))))
         reader = select_reader(files[0])
 
         if reader is None:
