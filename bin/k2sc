@@ -137,11 +137,14 @@ def detrend(dataset):
         inputs = np.transpose([ds.time, ds.x, ds.y])
         masks.append(mask)
 
-        detrender = Detrender(flux, inputs, mask = mask, splits = splits,
-                              kernel = BasicKernelEP(),
-                              tr_nrandom = args.tr_nrandom,
-                              tr_nblocks = args.tr_nblocks,
-                              tr_bspan = args.tr_bspan)
+        try:
+            detrender = Detrender(flux, inputs, mask = mask, splits = splits,
+                                  kernel = BasicKernelEP(),
+                                  tr_nrandom = args.tr_nrandom,
+                                  tr_nblocks = args.tr_nblocks,
+                                  tr_bspan = args.tr_bspan)
+        except:
+            error("Failed to initialize")
     
         ttrend,ptrend = detrender.predict(detrender.kernel.pv0+1e-5, components=True)
         cflux = flux-ptrend+median(ptrend)-ttrend+median(ttrend)
@@ -472,10 +475,7 @@ if __name__ == '__main__':
                 dataset = comm.recv(source=mpi_root, tag=0)
                 if infile == -1:
                     break
-                try:
-                    detrend(dataset)
-                except:
-                    logger.warning("Failed to detrend {:s}, skipping.".format(infile))
+                detrend(dataset)
                 comm.send(dataset.epic, dest=mpi_root, tag=2)    
 
 
