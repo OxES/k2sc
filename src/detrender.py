@@ -25,6 +25,7 @@ class Detrender(object):
             self.tr_data  = self.data.create_training_set(tr_nrandom, tr_bspan, tr_nblocks)
         except:
             self.tr_data = self.data.copy()
+            
         self.gp.set_inputs(self.tr_data.masked_inputs)
 
     ## ======================
