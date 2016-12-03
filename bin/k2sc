@@ -450,10 +450,12 @@ if __name__ == '__main__':
                         if not exists(infile):
                             logger.warning("The input file {:s} doesn't exist, skipping the file".format(infile))
                             continue
-                        
-                    dataset = reader.read(infile, sid=sid, type=args.flux_type, campaign=args.campaign)
-                    comm.send(dataset, dest=w, tag=0)
-                    active_workers.append(w)
+                    try:
+                        dataset = reader.read(infile, sid=sid, type=args.flux_type, campaign=args.campaign)
+                        comm.send(dataset, dest=w, tag=0)
+                        active_workers.append(w)
+                    except:
+                        continue
 
                 ## Receive the results
                 for w in active_workers:
