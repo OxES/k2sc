@@ -20,7 +20,7 @@ warnings.resetwarnings()
 warnings.filterwarnings('ignore', category=UserWarning, append=True)
 
 re_epic = re.compile('EPIC_([0-9]+)_')
-fntemplate = 'hlsp_k2sc_k2_lightcurve_{epic:9d}-c{c:02d}_kepler_v{v:1d}_llc.fits'
+fntemplate = 'hlsp_k2sc_k2_llc_{epic:9d}-c{c:02d}_kepler_v{v:1d}_lc.fits'
 
 def create_series(path, name):
     files = sorted(glob(path))
@@ -54,16 +54,16 @@ if __name__ == '__main__':
             epri.header['origin'] = epdc.header['origin']
             epri.header['creator'] = epdc.header['program']
             epri.header['date'] = t = datetime.today().strftime('%Y-%m-%dT%H:%M:%S')
-            for k in 'procver filever timversn checksum'.split():
+
+            for k in 'procver filever timversn checksum object'.split():
                 if k in epri.header.keys():
                     epri.header.remove(k)
                     
             for e in (epdc,esap):
-                e.data.flux_1[:] = (e.data.flux_1 
-                                    - e.data.trend_p_1 + nanmean(e.data.trend_p_1)
-                                    - e.data.trend_t_1 + nanmean(e.data.trend_t_1))
-                for c in e.data.columns:
-                    c.name = c.name.strip('_1')
+                e.header.remove('object')
+                e.data.flux[:] = (e.data.flux 
+                                    - e.data.trposi + nanmean(e.data.trposi)
+                                    - e.data.trtime + nanmean(e.data.trtime))
             hdu_list = pf.HDUList([epri, epdc, esap])
             hdu_list[1].header['EXTNAME'] = 'PDC'
             hdu_list[2].header['EXTNAME'] = 'SAP'
