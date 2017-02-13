@@ -92,8 +92,8 @@ class BasicKernel(DtKernel):
     
     def _define_kernel(self):
         pv = self._pv
-        self._k1 = pv[0] * ESK(1/pv[1], ndim=3, dim=0)
-        self._k2 = pv[2] * ESK(1/pv[3], ndim=3, dim=1) * ESK(1/pv[4], ndim=3, dim=2)
+        self._k1 = pv[0] * ESK(1/pv[1], ndim=3, axes=0)
+        self._k2 = pv[2] * ESK(1/pv[3], ndim=3, axes=1) * ESK(1/pv[4], ndim=3, axes=2)
         self._k   = self._k1 + self._k2
 
     def map_pv(self, pv):
@@ -119,8 +119,8 @@ class BasicKernelEP(BasicKernel):
 
     def _define_kernel(self):
         pv = self._pv
-        self._k1 = pv[0] * ESK(1/pv[1], ndim=3, dim=0)
-        self._k2 = pv[2] * EK(1/pv[3], ndim=3, dim=1) * EK(1/pv[4], ndim=3, dim=2)
+        self._k1 = pv[0] * ESK(1/pv[1], ndim=3, axes=0)
+        self._k2 = pv[2] * EK(1/pv[3], ndim=3, axes=1) * EK(1/pv[4], ndim=3, axes=2)
         self._k   = self._k1 + self._k2
 
 
@@ -139,9 +139,9 @@ class PeriodicKernel(DtKernel):
 
     def _define_kernel(self):
         pv = self._pv
-        self._k1 = pv[0] * ESn2K(pv[1], pv[2], ndim=3, dim=0)
-        self._k2 = ( pv[3] * ESK(pv[4], ndim=3, dim=1) * ESK(pv[5], ndim=3, dim=2)
-                   + pv[6] * ESK(pv[7], ndim=3, dim=0))
+        self._k1 = pv[0] * ESn2K(pv[1], pv[2], ndim=3, axes=0)
+        self._k2 = ( pv[3] * ESK(pv[4], ndim=3, axes=1) * ESK(pv[5], ndim=3, axes=2)
+                   + pv[6] * ESK(pv[7], ndim=3, axes=0))
         self._k   = self._k1 + self._k2
 
 
@@ -171,8 +171,8 @@ class QuasiPeriodicKernel(BasicKernel):
 
     def _define_kernel(self):
         pv = self._pv
-        self._k1 = pv[0] * ESn2K(1/pv[1], pv[2], ndim=3, dim=0) * ESK(1/pv[3], ndim=3, dim=0)
-        self._k2 = pv[4] * ESK(1/pv[5], ndim=3, dim=1) * ESK(1/pv[6], ndim=3, dim=2)
+        self._k1 = pv[0] * ESn2K(1/pv[1], pv[2], ndim=3, axes=0) * ESK(1/pv[3], ndim=3, axes=0)
+        self._k2 = pv[4] * ESK(1/pv[5], ndim=3, axes=1) * ESK(1/pv[6], ndim=3, axes=2)
         self._k  = self._k1 + self._k2
 
     def map_pv(self, pv):
@@ -201,8 +201,8 @@ class QuasiPeriodicKernelEP(QuasiPeriodicKernel):
 
     def _define_kernel(self):
         pv = self._pv
-        self._k1 = pv[0] * ESn2K(1/pv[1], pv[2], ndim=3, dim=0) * ESK(1/pv[3], ndim=3, dim=0)
-        self._k2 = pv[4] * EK(1/pv[5], ndim=3, dim=1) * EK(1/pv[6], ndim=3, dim=2)
+        self._k1 = pv[0] * ESn2K(1/pv[1], pv[2], ndim=3, axes=0) * ESK(1/pv[3], ndim=3, axes=0)
+        self._k2 = pv[4] * EK(1/pv[5], ndim=3, axes=1) * EK(1/pv[6], ndim=3, axes=2)
         self._k  = self._k1 + self._k2
     
         
