@@ -61,11 +61,9 @@ if __name__ == '__main__':
                     
             for e in (epdc,esap):
                 e.header.remove('object')
-                e.data.flux_1[:] = (e.data.flux_1 
-                                    - e.data.trend_p_1 + nanmean(e.data.trend_p_1)
-                                    - e.data.trend_t_1 + nanmean(e.data.trend_t_1))
-                for c in e.data.columns:
-                    c.name = c.name.strip('_1')
+                e.data.flux[:] = (e.data.flux 
+                                    - e.data.trposi + nanmean(e.data.trposi)
+                                    - e.data.trtime + nanmean(e.data.trtime))
             hdu_list = pf.HDUList([epri, epdc, esap])
             hdu_list[1].header['EXTNAME'] = 'PDC'
             hdu_list[2].header['EXTNAME'] = 'SAP'
