@@ -138,7 +138,7 @@ class PeriodicKernel(DtKernel):
         self.set_pv(self._pv)
 
     def _define_kernel(self):
-        self.map_pv(self._pv)
+        pv = self.map_pv(self._pv)
         self._k1 = pv[0] * ESn2K(pv[1], pv[2], ndim=3, axes=0)
         self._k2 = ( pv[3] * ESK(pv[4], ndim=3, axes=1) * ESK(pv[5], ndim=3, axes=2)
                    + pv[6] * ESK(pv[7], ndim=3, axes=0))
@@ -170,7 +170,7 @@ class QuasiPeriodicKernel(BasicKernel):
         self.set_pv(self._pv)
 
     def _define_kernel(self):
-        self.map_pv(self._pv)
+        pv = self.map_pv(self._pv)
         self._k1 = pv[0] * ESn2K(1/pv[1], pv[2], ndim=3, axes=0) * ESK(1/pv[3], ndim=3, axes=0)
         self._k2 = pv[4] * ESK(1/pv[5], ndim=3, axes=1) * ESK(1/pv[6], ndim=3, axes=2)
         self._k  = self._k1 + self._k2
@@ -200,7 +200,7 @@ class QuasiPeriodicKernelEP(QuasiPeriodicKernel):
               UP(   -6,   0)]                ## 7 -- log10 white noise
 
     def _define_kernel(self):
-        self.map_pv(self._pv)
+        pv = self.map_pv(self._pv)
         self._k1 = pv[0] * ESn2K(1/pv[1], pv[2], ndim=3, axes=0) * ESK(1/pv[3], ndim=3, axes=0)
         self._k2 = pv[4] * EK(1/pv[5], ndim=3, axes=1) * EK(1/pv[6], ndim=3, axes=2)
         self._k  = self._k1 + self._k2
