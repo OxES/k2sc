@@ -111,14 +111,24 @@ class MASTReader(DataReader):
         [h.remove('CHECKSUM') for h in (phead,dhead)]
         [phead.remove(k) for k in 'CREATOR PROCVER FILEVER TIMVERSN'.split()]
 
+        x, y = data['pos_corr1'], data['pos_corr2']
+
+        if np.sum(np.isfinite(x)<(np.size(x)/2)):
+            x, y = data['mom_centr1'], data['mom_centr2']
+
+            x -= np.nanmedian(x)
+            y -= np.nanmedian(y)
+
+        print x, y
+
         return K2Data(epic,
                       time    = data['time'],
                       cadence = data['cadenceno'],
                       quality = data['sap_quality'],
                       fluxes  = data[fkey],
                       errors  = data[fkey+'_err'],
-                      x       = data['pos_corr1'],
-                      y       = data['pos_corr2'],
+                      x       = x,
+                      y       = y,
                       primary_header = phead,
                       data_header = dhead,
                       campaign = phead['campaign'])
