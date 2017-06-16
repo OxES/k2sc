@@ -164,7 +164,8 @@ class SPLOXReader(DataReader):
                       errors=cls._cache.errors[sid,:,:-1],
                       x=cls._cache.x[sid,:-1],
                       y=cls._cache.y[sid,:-1],
-                      sap_header=cls._cache.header,
+                      primary_header=cls._cache.header,
+                      data_header=cls._cache.header,
                       campaign = kwargs.get('campaign', None))    
 
     
