@@ -9,9 +9,9 @@ from numpy import array, atleast_2d, zeros, ones, ones_like, argmax, all, isfini
 from scipy.ndimage import binary_dilation, binary_erosion
 from scipy.signal import medfilt
 
-from ls import fasper
-from utils import medsig, fold
-from core import *
+from .ls import fasper
+from .utils import medsig, fold
+from .core import *
 
 class K2Data(object):
     """Encapsulates the K2 data.

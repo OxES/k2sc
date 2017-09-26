@@ -84,11 +84,11 @@ class DiffEvol(object):
     def __call__(self, ngen=1):
         t = np.zeros(3, np.int)
         
-        for i in xrange(self.n_pop):
+        for i in range(self.n_pop):
             self._fitness[i] = self.m * self.minfun(self._population[i,:])
 
-        for j in xrange(ngen):
-            for i in xrange(self.n_pop):
+        for j in range(ngen):
+            for i in range(self.n_pop):
                 t[:] = i
                 while  t[0] == i:
                     t[0] = randint(self.n_pop)

@@ -1,5 +1,5 @@
 import scipy.linalg as sla
-from detrender import *
+from .detrender import *
 
 
 class SegmentedDetrender(Detrender):

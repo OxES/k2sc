@@ -5,8 +5,8 @@ import numpy as np
 
 from numpy import nan, any, array, asarray, ones, arange, delete, where
 from numpy.random import permutation
-from utils import medsig
-from core import *
+from .utils import medsig
+from .core import *
 
 class DtData(object):
     """Utility class that encapsulates the fluxes and inputs for a detrender.

@@ -1,7 +1,7 @@
 import numpy as np
 import astropy.io.fits as pf
 
-from k2sc.core import *
+from .core import *
 
 def submed(a):
     return a - np.nanmedian(a)

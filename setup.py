@@ -1,20 +1,16 @@
-from numpy.distutils.core import setup, Extension
-from numpy.distutils.misc_util import Configuration
-import distutils.sysconfig as ds
-
-long_description = ''
+from setuptools import setup
 
 setup(name='K2SC',
-      version='0.5',
+      version='0.8',
       description='K2 light curve detrending with Gaussian Processes.',
-      long_description=long_description,
+      long_description='K2 light curve detrending with Gaussian Processes.',
       author='Suzanne Aigrain',
-      author_email='',
-      url='',
+      author_email='suzanne.aigrain@physics.ox.ac.uk',
+      url='https://github.com/OxES/k2sc',
       package_dir={'k2sc':'src'},
       scripts=['bin/k2sc','bin/k2plot','bin/k2ginfo', 'bin/k2mastify'],
       packages=['k2sc'],
-      install_requires=["numpy", "astropy", "scipy", "george"],
+      install_requires=["numpy", "astropy", "scipy", "george>=0.3"],
       license='GPLv2',
       classifiers=[
           "Topic :: Scientific/Engineering",

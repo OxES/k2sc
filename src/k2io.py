@@ -29,7 +29,7 @@ from os.path import basename, splitext
 from datetime import datetime
 from collections import namedtuple
 
-from k2data import K2Data
+from .k2data import K2Data
 
 warnings.resetwarnings()
 warnings.filterwarnings('ignore', category=UserWarning, append=True)
@@ -81,7 +81,7 @@ class AMCReader(DataReader):
     @classmethod
     def can_read(cls, fname):
         ext_ok = cls.is_extension_valid(fname)
-        with open(fname) as f:
+        with open(fname, 'rb') as f:
             header = f.readline().lower().split()
             head_ok = all([cn in header for cn in 'dates cadences xpos ypos quality'.split()])
         return ext_ok and head_ok
@@ -237,7 +237,7 @@ class FITSWriter(object):
         
         primary_hdu = pf.PrimaryHDU(header=data.primary_header)
         hdu_list = pf.HDUList([primary_hdu, hdu])
-        hdu_list.writeto(fname, clobber=True)
+        hdu_list.writeto(fname, overwrite=True)
 
 
 readers = [AMCReader,MASTReader,SPLOXReader]

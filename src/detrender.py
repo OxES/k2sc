@@ -10,10 +10,10 @@ from numpy import (any, array, asarray, ones, ones_like, zeros, isfinite, inf, c
 from numpy.random import permutation
 from matplotlib.pyplot import subplots, setp
 
-from gp import GeorgeGP, SplitGP
-from kernels import BasicKernel
-from utils import medsig
-from dtdata import DtData
+from .gp import GeorgeGP, SplitGP
+from .kernels import BasicKernel
+from .utils import medsig
+from .dtdata import DtData
 
 class Detrender(object):
     def __init__(self, flux, inputs, mask=None, p0=None, kernel=None, splits=[], tr_nrandom=200, tr_bspan=50, tr_nblocks=6):
