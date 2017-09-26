@@ -34,10 +34,10 @@ class GeorgeGP(object):
     def _covariance_matrix(self, x1, x2=None, pv=None, separate=False):
         self.set_pv(pv)
         if separate:
-            return (self.kernel._k1.value(x1, x2),
-                    self.kernel._k2.value(x1, x2))
+            return (self.kernel._k1.get_value(x1, x2),
+                    self.kernel._k2.get_value(x1, x2))
         else:
-            return self.kernel._k.value(x1, x2)
+            return self.kernel._k.get_value(x1, x2)
     
     def compute(self, x=None, pv=None):
         self.set_pv(pv)
@@ -57,8 +57,8 @@ class GeorgeGP(object):
     def predict_components(self, pv, y, x1, x2=None):
         self.compute(x1, pv)
         b  = self._gp.solver.apply_inverse(y)
-        K1 = self.kernel._k1.value(x1, x2)
-        K2 = self.kernel._k2.value(x1, x2)
+        K1 = self.kernel._k1.get_value(x1, x2)
+        K2 = self.kernel._k2.get_value(x1, x2)
         mu_time = dot(K1,b)
         mu_pos  = dot(K2,b)
         return mu_time, mu_pos
@@ -109,8 +109,8 @@ class SplitGP(GeorgeGP):
 
 
     def _covariance_matrix(self, x1, x2=None, separate=False, add_wn=False):
-        K1 = self.kernel._k1.value(x1, x2)
-        K2 = self.kernel._k2.value(x1, x2)
+        K1 = self.kernel._k1.get_value(x1, x2)
+        K2 = self.kernel._k2.get_value(x1, x2)
 
         x2 = x2 if x2 is not None else x1
         if self.splits is not None:
