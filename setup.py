@@ -11,13 +11,13 @@ setup(name='K2SC',
       scripts=['bin/k2sc','bin/k2plot','bin/k2ginfo', 'bin/k2mastify'],
       packages=['k2sc'],
       install_requires=["numpy", "astropy", "scipy", "george>=0.3"],
-      license='GPLv2',
+      license='GPLv3',
       classifiers=[
           "Topic :: Scientific/Engineering",
           "Intended Audience :: Science/Research",
           "Intended Audience :: Developers",
           "Development Status :: 4 - Beta",
-          "License :: OSI Approved :: GNU General Public License v2 (GPLv2)",
+          "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
           "Operating System :: OS Independent",
           "Programming Language :: Python"
       ]
