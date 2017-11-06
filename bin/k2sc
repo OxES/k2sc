@@ -1,6 +1,5 @@
 #!/usr/bin/env python
 from __future__ import print_function, division
-import os
 import sys
 import errno
 import warnings
@@ -8,9 +7,6 @@ import logging
 
 import math as mt
 import numpy as np
-import scipy as sp
-import astropy.io.fits as pf
-import matplotlib.pyplot as pl
 from glob import glob
 
 try:
@@ -26,13 +22,11 @@ except ImportError:
 
 from copy import copy   
 from collections import namedtuple
-from matplotlib.backends.backend_pdf import PdfPages
 from numpy import (any, array, ones_like, fromstring, tile, median,
                    zeros_like, exp, isfinite, nanmean, argmax, argmin)
 from numpy.random import normal
 
 from time import time, sleep
-from datetime import datetime
 from os.path import join, exists, abspath, basename, isdir
 from argparse import ArgumentParser
 

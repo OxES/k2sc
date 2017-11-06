@@ -2,6 +2,9 @@ from __future__ import division
 
 import math as m
 import numpy as np
+
+import matplotlib as mpl
+mpl.use('Agg')
 import matplotlib.pyplot as pl
 
 from scipy.optimize import fmin, fmin_powell, minimize
