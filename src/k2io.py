@@ -108,7 +108,11 @@ class MASTReader(DataReader):
         phead = pf.getheader(fname, 0)
         dhead = pf.getheader(fname, 1)
 
-        [h.remove('CHECKSUM') for h in (phead,dhead)]
+        try:
+            [h.remove('CHECKSUM') for h in (phead,dhead)]
+        except:
+            pass # this can be an issue on some custom file formats
+            
         [phead.remove(k) for k in 'CREATOR PROCVER FILEVER TIMVERSN'.split()]
 
         return K2Data(epic,
