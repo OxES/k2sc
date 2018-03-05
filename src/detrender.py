@@ -13,6 +13,7 @@ from numpy import (any, array, asarray, ones, ones_like, zeros, isfinite, inf, c
 from numpy.random import permutation
 from matplotlib.pyplot import subplots, setp
 
+from numpy.linalg.linalg import LinAlgError
 from .gp import GeorgeGP, SplitGP
 from .kernels import BasicKernel
 from .utils import medsig
@@ -53,9 +54,12 @@ class Detrender(object):
         if any(pv < self.kernel.lims[0]) or any(self.kernel.lims[1] < pv):
             return inf
         ds = self.tr_data if training else self.data
-        return -(self.kernel.ln_prior(pv) + 
-                 self.gp.lnlikelihood(pv, ds.masked_normalised_flux, ds.masked_inputs))
-    
+        try:
+            lnlike = self.gp.lnlikelihood(pv, ds.masked_normalised_flux, ds.masked_inputs)
+            return -(self.kernel.ln_prior(pv) + lnlike)
+        except LinAlgError:
+            return inf
+
 
     def train(self, pv0=None, disp=False):
         pv0 = pv0 if pv0 is not None else self.kernel.pv0
