@@ -339,7 +339,7 @@ if __name__ == '__main__':
             logger.addHandler(fh)
 
     if not exists(args.save_dir):
-        logger.error("Error: the save directory {:s} doesn't exists".format(args.save_dir), file=sys.stderr)
+        logger.error("Error: the save directory {:s} doesn't exist".format(args.save_dir), file=sys.stderr)
         exit(errno.ENOENT)
 
     ## Test whether we're dealing with a directory or a list of files and select
