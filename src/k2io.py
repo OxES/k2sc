@@ -241,7 +241,7 @@ class FITSWriter(object):
 
         for h in (data.primary_header,hdu.header):
             h['origin'] = 'SPLOX: Stars and Planets at Oxford'
-            h['program'] = 'k2SC v0.9'
+            h['program'] = 'k2SC v1.0'
             h['date']   = datetime.today().strftime('%Y-%m-%dT%H:%M:%S')
         
         primary_hdu = pf.PrimaryHDU(header=data.primary_header)
