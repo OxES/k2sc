@@ -24,6 +24,7 @@ from copy import copy
 from collections import namedtuple
 from numpy import (any, array, ones_like, fromstring, tile, median,
                    zeros_like, exp, isfinite, argmax, argmin)
+import numpy
 from numpy.random import normal
 
 from time import time, sleep
