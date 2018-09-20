@@ -322,7 +322,7 @@ if __name__ == '__main__':
     gde.add_argument('--de-npop', default=100, type=int, help='Size of the differential evolution parameter vector population')
     gde.add_argument('--de-niter', default=150, type=int, help='Number of differential evolution iterations')
     gde.add_argument('--de-max-time', default=300, type=float, help='Maximum time used for differential evolution')
-    gps.add_argument('--ls-max-fap', default=-50, type=float, help='Maximum Lomb-Scargle log10(false alarm) treshold to use the periodic kernel')
+    gps.add_argument('--ls-max-fap', default=-50, type=float, help='Maximum Lomb-Scargle log10(false alarm) threshold to use the periodic kernel')
     gps.add_argument('--ls-min-period', default=0.05, type=float, help='Minimum period to search for')
     gps.add_argument('--ls-max-period', default=25, type=float, help='Maximum period to search for')
     god.add_argument('--outlier-sigma', default=5, type=float)

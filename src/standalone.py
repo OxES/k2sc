@@ -18,6 +18,9 @@ from k2sc.utils import medsig, sigma_clip
 import lightkurve
 
 def psearch(time, flux, min_p, max_p):
+    '''
+    Search for a statistically significant period using a Lomb-Scargle periodogram.
+    '''
     freq,power,nout,jmax,prob = fasper(time, flux, 6, 0.5)
     period = 1/freq
     m = (period > min_p) & (period < max_p) 
@@ -33,14 +36,36 @@ def psearch(time, flux, min_p, max_p):
     
     return period[j], fap
 
-def detrend(dataset,splits=None,quiet=False,save_dir='.',seed=0,flux_type='pdc',default_position_kernel='SqrExp',
+def detrend(dataset,campaign=5,splits=None,quiet=False,save_dir='.',seed=0,flux_type='pdc',default_position_kernel='SqrExp',
            kernel=None, kernel_period=None,p_mask_center=None,p_mask_period=None,p_mask_duration=None,
            tr_nrandom=400,tr_nblocks=6,tr_bspan=50,de_npop=100,de_niter=150,de_max_time=300,
-           ls_max_fap=-50,ls_min_period=0.05,ls_max_period=25,outlier_sigma=5,outlier_mwidth=25):
+           ls_max_fap=-50,ls_min_period=0.05,ls_max_period=25,  outlier_sigma=5,outlier_mwidth=25):
     '''This is a function to detrend a single k2sc dataset, outside of the framework of 
     logging that is in bin/k2sc, but duplicating the functionality of the
     local function there 'detrend'. This is here to permit access to k2sc from lightkurve, or other
-    similar light curve wrapping packages that might like to use k2sc.'''
+    similar light curve wrapping packages that might like to use k2sc.
+
+    Arguments
+
+    campaign: Number of the K2 campaign.
+    splits: time values to split the light curve into separate segments for systematics - if you have a campaign, it will choose default splits from default_splits.
+    quiet: does not currently do anything.
+    save_dir: directory to save results. Default is current directory.
+    seed: seed for random number draws for optimization.
+    flux_type: either 'sap' or 'pdc'. Use either the Simple Aperture Photometry or the Presearch Data Conditioning (ie Kepler pipeline corrected) lightcurve as input.
+    default_position_kernel: which kernel should we use for the GP in position? Defaults to squared exponential.
+    kernel: set a time kernel explicitly. If this is None, then it finds this automatically by checking for periodicity and choosing either a periodic or a basic (squared exponential) kernel. \
+        options are 'quasiperiodic', 'basic_ep', 'periodic', 'quasiperiodic_ep', 'basic'.
+    kernel_period: if you are using a kernel with periodicity, this lets you set the periodicity manually.
+    p_mask_center, p_mask_period, ,p_mask_duration: mask a planet transit out from the GP fitting by setting its zero-epoch, period and duration. All three must be set.
+    tr_random, tr_nblocks, tr_bspan: When training the GP, the light curve is broken up into random blocks. These give the number of random samples, number of sample blocks, and span of a single block.\
+        Do not change this unless you know what you are doing - but it can be useful if you have very long or short light curves and are getting errors.
+    de_npop, de_niter, de_max_time: settings for the Differential Evolution global optimizer. Cut down one or all of these numbers to spend less time searching for a global optimum - at your peril.
+    ls_max_fap, ls_min_period, ls_max_period: In searching for a period with a Lomb-Scargle periodogram, this sets the maximum Lomb-Scargle log10(false alarm) threshold to use the periodic kernel, \
+        and min and max periods to search.
+    outlier_sigma, outlier_mwidth: The sigma and window width to be used in outlier clipping.
+
+    '''
 
     ## Setup the logger
     ## ----------------
@@ -240,8 +265,24 @@ def detrend(dataset,splits=None,quiet=False,save_dir='.',seed=0,flux_type='pdc',
         return result
 
 class k2sc_lc(lightkurve.KeplerLightCurve):
+    '''
+    This class is a wrapper for lightkurve (github.com/KeplerGO/lightkurve) so it can call k2sc. This is a work in progress at both ends and the aim is currently to include TessLightCurve objects as well.
 
-    def get_k2data(self):
+    Example use is shown in k2sc/notebooks/lightkurve.py, where you will want to instantiate a k2sc_lc object by
+
+    tpf = KeplerTargetPixelFile.from_archive(212300977) # WASP-55
+    lc = tpf.to_lightcurve() # load some data either as a tpf or just straight up as a lightcurve
+    lc.primary_header = tpf.hdu[0].header
+    lc.data_header = tpf.hdu[1].header
+    lc.pos_corr1 = tpf.hdu[1].data['POS_CORR1'][tpf.quality_mask]
+    lc.pos_corr2 = tpf.hdu[1].data['POS_CORR2'][tpf.quality_mask]
+    
+    # now the magic happens
+    lc.__class__ = k2sc_lc
+    lc.k2sc()
+    '''
+
+    def get_k2data(self,campaign=5):
         try:
             x, y = self.pos_corr1, self.pos_corr2
         except:
@@ -256,12 +297,12 @@ class k2sc_lc(lightkurve.KeplerLightCurve):
                       y       = y,
                       primary_header = self.primary_header,
                       data_header = self.data_header,
-                      campaign=5)
+                      campaign=campaign)
         return dataset
 
-    def k2sc(self):
+    def k2sc(self,**kwargs):
         dataset = self.get_k2data()
-        results = detrend(dataset)
+        results = detrend(dataset,**kwargs) # see keyword arguments from detrend above
         self.tr_position = results.tr_position
         self.tr_time = results.tr_time 
         self.pv = results.pv # hyperparameters 
