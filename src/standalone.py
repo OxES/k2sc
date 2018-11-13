@@ -287,7 +287,7 @@ class k2sc_lc(lightkurve.KeplerLightCurve):
             x, y = self.pos_corr1, self.pos_corr2
         except:
             x, y = self.centroid_col, self.centroid_row
-        dataset = K2Data(self.keplerid,
+        dataset = K2Data(self.targetid,
                  time = self.time,
                       cadence = self.cadenceno,
                       quality = self.quality,
