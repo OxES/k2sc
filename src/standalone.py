@@ -78,11 +78,11 @@ def detrend(dataset,campaign=5,splits=None,quiet=False,save_dir='.',seed=0,flux_
     ## Define the splits
     ## -----------------
 
-    default_splits = {3:[2154,2190], 4:[2240,2273], 5:[2344], 6:[2390,2428], 7:[2468.5,2515],13:[2998,3033]}
+    default_splits = {3:[2154,2190], 4:[2240,2273], 5:[2344], 6:[2390,2428], 7:[2468.5,2515],8:[2579,2598.5],102:[2778],12:[2915,2951],
+                      13:[2998,3033],14:[3085,3123.75],15:[3170,3207.5],16:[3297.5,3331],17:[3367,3400],18:[3425,3460]}
 
     if splits is None and ds.campaign not in default_splits.keys():
         print('The campaign not known and no splits given.')
-        return 0
     elif splits is not None:
         splits = splits
         print('Using split values {:s} given from the command line'.format(str(splits)))
@@ -282,7 +282,7 @@ class k2sc_lc(lightkurve.KeplerLightCurve):
     lc.k2sc()
     '''
 
-    def get_k2data(self,campaign=5):
+    def get_k2data(self):
         try:
             x, y = self.pos_corr1, self.pos_corr2
         except:
@@ -297,12 +297,12 @@ class k2sc_lc(lightkurve.KeplerLightCurve):
                       y       = y,
                       primary_header = self.primary_header,
                       data_header = self.data_header,
-                      campaign=campaign)
+                      campaign=self.campaign)
         return dataset
 
     def k2sc(self,**kwargs):
         dataset = self.get_k2data()
-        results = detrend(dataset,**kwargs) # see keyword arguments from detrend above
+        results = detrend(dataset,campaign=self.campaign,**kwargs) # see keyword arguments from detrend above
         self.tr_position = results.tr_position
         self.tr_time = results.tr_time 
         self.pv = results.pv # hyperparameters 
