@@ -194,7 +194,7 @@ def detrend(dataset,campaign=5,splits=None,quiet=False,save_dir='.',seed=0,flux_
             ## ----------------------------------
             print('Starting global hyperparameter optimisation using DE')
             tstart_de = time()
-            for i,r in enumerate(de(de_niter)):
+            for i,r in enumerate((de(de_niter))):
                 print('  DE iteration %3i -ln(L) %4.1f', i, de.minimum_value)
                 tcur_de = time()
                 if ((de._fitness.ptp() < 3) or (tcur_de - tstart_de > de_max_time)) and (i>2):
@@ -260,7 +260,7 @@ def detrend(dataset,campaign=5,splits=None,quiet=False,save_dir='.',seed=0,flux_
         print('  CDPP - raw - %6.3f', cdpp_r)
         print('  CDPP - position component removed - %6.3f', cdpp_t)
         print('  CDPP - full reduction - %6.3f', cdpp_c)
-        print('Detrending time %6.3f', time()-tstart)
+        print('Detrending time',time()-tstart)
         
         return result
 
@@ -272,6 +272,7 @@ class k2sc_lc(lightkurve.KeplerLightCurve):
 
     tpf = KeplerTargetPixelFile.from_archive(212300977) # WASP-55
     lc = tpf.to_lightcurve() # load some data either as a tpf or just straight up as a lightcurve
+    lc = lc.remove_nans() # don't know why the quality flags are weird
     lc.primary_header = tpf.hdu[0].header
     lc.data_header = tpf.hdu[1].header
     lc.pos_corr1 = tpf.hdu[1].data['POS_CORR1'][tpf.quality_mask]
