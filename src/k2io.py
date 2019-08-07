@@ -81,7 +81,7 @@ class AMCReader(DataReader):
     @classmethod
     def can_read(cls, fname):
         ext_ok = cls.is_extension_valid(fname)
-        with open(fname, 'rt') as f:
+        with open(fname, 'rb') as f:
             header = f.readline().lower().split()
             head_ok = all([cn in header for cn in 'dates cadences xpos ypos quality'.split()])
         return ext_ok and head_ok

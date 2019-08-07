@@ -78,11 +78,11 @@ def detrend(dataset,campaign=5,splits=None,quiet=False,save_dir='.',seed=0,flux_
     ## Define the splits
     ## -----------------
 
-    default_splits = {3:[2154,2190], 4:[2240,2273], 5:[2344], 6:[2390,2428], 7:[2468.5,2515],13:[2998,3033]}
+    default_splits = {3:[2154,2190], 4:[2240,2273], 5:[2344], 6:[2390,2428], 7:[2468.5,2515],8:[2579,2598.5],102:[2778],11:[2830],12:[2915,2951],
+                      13:[2998,3033],14:[3085,3123.75],15:[3170,3207.5],16:[3297.5,3331],17:[3367,3400],18:[3425,3460]}
 
     if splits is None and ds.campaign not in default_splits.keys():
         print('The campaign not known and no splits given.')
-        return 0
     elif splits is not None:
         splits = splits
         print('Using split values {:s} given from the command line'.format(str(splits)))
@@ -194,7 +194,7 @@ def detrend(dataset,campaign=5,splits=None,quiet=False,save_dir='.',seed=0,flux_
             ## ----------------------------------
             print('Starting global hyperparameter optimisation using DE')
             tstart_de = time()
-            for i,r in enumerate(de(de_niter)):
+            for i,r in enumerate((de(de_niter))):
                 print('  DE iteration %3i -ln(L) %4.1f', i, de.minimum_value)
                 tcur_de = time()
                 if ((de._fitness.ptp() < 3) or (tcur_de - tstart_de > de_max_time)) and (i>2):
@@ -260,7 +260,7 @@ def detrend(dataset,campaign=5,splits=None,quiet=False,save_dir='.',seed=0,flux_
         print('  CDPP - raw - %6.3f', cdpp_r)
         print('  CDPP - position component removed - %6.3f', cdpp_t)
         print('  CDPP - full reduction - %6.3f', cdpp_c)
-        print('Detrending time %6.3f', time()-tstart)
+        print('Detrending time',time()-tstart)
         
         return result
 
@@ -272,6 +272,7 @@ class k2sc_lc(lightkurve.KeplerLightCurve):
 
     tpf = KeplerTargetPixelFile.from_archive(212300977) # WASP-55
     lc = tpf.to_lightcurve() # load some data either as a tpf or just straight up as a lightcurve
+    lc = lc.remove_nans() # don't know why the quality flags are weird
     lc.primary_header = tpf.hdu[0].header
     lc.data_header = tpf.hdu[1].header
     lc.pos_corr1 = tpf.hdu[1].data['POS_CORR1'][tpf.quality_mask]
@@ -282,7 +283,7 @@ class k2sc_lc(lightkurve.KeplerLightCurve):
     lc.k2sc()
     '''
 
-    def get_k2data(self,campaign=5):
+    def get_k2data(self):
         try:
             x, y = self.pos_corr1, self.pos_corr2
         except:
@@ -297,13 +298,16 @@ class k2sc_lc(lightkurve.KeplerLightCurve):
                       y       = y,
                       primary_header = self.primary_header,
                       data_header = self.data_header,
-                      campaign=campaign)
+                      campaign=self.campaign)
         return dataset
 
     def k2sc(self,**kwargs):
         dataset = self.get_k2data()
-        results = detrend(dataset,**kwargs) # see keyword arguments from detrend above
+        results = detrend(dataset,campaign=self.campaign,**kwargs) # see keyword arguments from detrend above
         self.tr_position = results.tr_position
         self.tr_time = results.tr_time 
         self.pv = results.pv # hyperparameters 
         self.corr_flux = self.flux - self.tr_position + nanmedian(self.tr_position) 
+        self.cdpp_r = results.cdpp_r
+        self.cdpp_t = results.cdpp_t
+        self.cdpp_c = results.cdpp_c
