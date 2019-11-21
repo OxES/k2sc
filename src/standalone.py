@@ -262,7 +262,7 @@ def detrend(dataset,campaign=5,splits=None,quiet=False,save_dir='.',seed=0,flux_
         print('  CDPP - full reduction - %6.3f', cdpp_c)
         print('Detrending time',time()-tstart)
         
-        return result
+        return result, detrender
 
 class k2sc_lc(lightkurve.KeplerLightCurve):
     '''
@@ -303,7 +303,7 @@ class k2sc_lc(lightkurve.KeplerLightCurve):
 
     def k2sc(self,**kwargs):
         dataset = self.get_k2data()
-        results = detrend(dataset,campaign=self.campaign,**kwargs) # see keyword arguments from detrend above
+        results, self.detrender = detrend(dataset,campaign=self.campaign,**kwargs) # see keyword arguments from detrend above
         self.tr_position = results.tr_position
         self.tr_time = results.tr_time 
         self.pv = results.pv # hyperparameters 
