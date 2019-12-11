@@ -1,7 +1,21 @@
 from setuptools import setup
+import os, codecs, re
+
+def read(*parts):
+    with codecs.open(os.path.join(here, *parts), 'r') as fp:
+        return fp.read()
+
+def find_version(*file_paths):
+    version_file = read(*file_paths)
+    version_match = re.search(r"^__version__ = ['\"]([^'\"]*)['\"]",
+                              version_file, re.M)
+    if version_match:
+        return version_match.group(1)
+    raise RuntimeError("Unable to find version string.")
+
 
 setup(name='K2SC',
-      version='1.0.1',
+      version=find_version("src", "__init__.py"),
       description='K2 light curve detrending with Gaussian Processes.',
       long_description='K2 light curve detrending with Gaussian Processes.',
       author='Suzanne Aigrain',
