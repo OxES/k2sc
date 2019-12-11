@@ -1,6 +1,8 @@
 from setuptools import setup
 import os, codecs, re
 
+here = os.path.abspath(os.path.dirname(__file__))
+
 def read(*parts):
     with codecs.open(os.path.join(here, *parts), 'r') as fp:
         return fp.read()
