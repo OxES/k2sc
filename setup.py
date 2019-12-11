@@ -1,7 +1,7 @@
 from setuptools import setup
 
 setup(name='K2SC',
-      version='1.0',
+      version='1.0.1',
       description='K2 light curve detrending with Gaussian Processes.',
       long_description='K2 light curve detrending with Gaussian Processes.',
       author='Suzanne Aigrain',
