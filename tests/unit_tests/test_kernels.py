@@ -8,7 +8,7 @@ from numpy.random import normal
 
 import sys
 sys.path.append('../../src')
-from kernels import *
+from k2sc.kernels import *
 
 class TestSplitGP(unittest.TestCase):
     """Test the SplitGP class
