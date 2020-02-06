@@ -50,11 +50,11 @@ def __spread__(y, yy, n, x, m):
     print('factorial table too small in spread')
     return
 
-  ix=long(x)
+  ix=int(x)
   if x == float(ix): 
     yy[ix]=yy[ix]+y
   else:
-    ilo = long(x-0.5*float(m)+1.0)
+    ilo = int(x-0.5*float(m)+1.0)
     ilo = min( max( ilo , 1 ), n-m+1 ) 
     ihi = ilo+m-1
     nden = nfac[m]
@@ -108,7 +108,7 @@ def fasper(x,y,ofac,hifac, MACC=4):
       Translation of IDL code (orig. Numerical recipies)
   """
   #Check dimensions of input arrays
-  n = long(len(x))
+  n = int(len(x))
   if n != len(y):
     print('Incompatible arrays.')
     return
@@ -120,7 +120,7 @@ def fasper(x,y,ofac,hifac, MACC=4):
   while nfreq < nfreqt: 
     nfreq = 2*nfreq
 
-  ndim = long(2*nfreq)
+  ndim = int(2*nfreq)
   
   #Compute the mean, variance
   ave = y.mean()
