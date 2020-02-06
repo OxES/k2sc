@@ -13,7 +13,7 @@ addons:
     - python-scipy
 
 before_install:
-  - pip install astropy george
+  - pip install astropy pybind11 george
 
 install:
   - python setup.py install

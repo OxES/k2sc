@@ -21,7 +21,6 @@ def medsig(a):
     sig = 1.48 * median(abs(a[l] - med))
     return med, sig
 
-
 def sigma_clip(a, max_iter=10, max_sigma=5, separate_masks=False, mexc=None):
     """Iterative sigma-clipping routine that separates not finite points, and down- and upwards outliers.
     """
@@ -40,7 +39,8 @@ def sigma_clip(a, max_iter=10, max_sigma=5, separate_masks=False, mexc=None):
         i += 1
 
     if separate_masks:
-        return mlow, mhigh
+        return mexc, mlow, mhigh
     else:
-        return mlow & mhigh
+        return mlow & mhigh & mexc
+
 
