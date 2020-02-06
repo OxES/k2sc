@@ -6,8 +6,8 @@ import numpy.testing as npt
 from numpy import nan
 from numpy.random import normal
 
-#from k2sc.utils import *
-execfile('../../src/utils.py')
+from k2sc.utils import *
+# execfile('../../src/utils.py')
 
 class TestMedSig(unittest.TestCase):
     """Test the median and sigma calculation
