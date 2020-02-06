@@ -17,7 +17,7 @@ before_install:
   - pip install george
 
 install:
-  - python setup.py config_fc --fcompiler=gnu95 --opt="-Ofast" --f90flags="-cpp -fopenmp -march=native" build install
+  - python setup.py install
 
 script: nosetests -w tests/unit_tests
 
