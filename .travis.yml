@@ -1,6 +1,6 @@
 language: python
 python:
-  - "3.7"
+  - "3.7.4"
 
 cache: pip
 
@@ -10,11 +10,10 @@ addons:
     - gfortran
     - python-pip
     - libeigen3-dev
-    - python-numpy
     - python-scipy
 
 before_install:
-  - pip install george
+  - pip install astropy george
 
 install:
   - python setup.py install
