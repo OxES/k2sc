@@ -229,9 +229,9 @@ def detrend(dataset,campaign=5,splits=None,quiet=False,save_dir='.',seed=0,flux_
 
             mper = ~(ds.mflags[iset] & M_PERIODIC).astype(bool)  # Apply the transit mask, if any
             mthf = ~(ds.quality & 2**20).astype(bool)            # Mask out the thruster firings
-            minf = isfinite(cflux)
+            # minf = isfinite(cflux)
 
-            mlow, mhigh = sigma_clip(cflux, max_iter = 10, max_sigma = 5, separate_masks = True, mexc = mper&mthf)
+            minf, mlow, mhigh = sigma_clip(cflux, max_iter = 10, max_sigma = 5, separate_masks = True, mexc = mper&mthf)
             ds.mflags[iset][~minf]  |= M_NOTFINITE
             ds.mflags[iset][~mhigh]  |= M_OUTLIER_U
             ds.mflags[iset][~mlow]   |= M_OUTLIER_D
