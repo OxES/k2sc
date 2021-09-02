@@ -4,7 +4,7 @@ from k2sc.k2data import K2Data
 from k2sc.ls import fasper
 from numpy import *
 import math as mt
-from time import time, sleep
+from time import time as clock, sleep
 from k2sc.cdpp import cdpp
 from k2sc.de import DiffEvol
 from numpy.random import normal
@@ -16,6 +16,8 @@ from k2sc.kernels import kernels, BasicKernel, BasicKernelEP, QuasiPeriodicKerne
 from k2sc.utils import medsig, sigma_clip
 
 import lightkurve
+
+from tqdm import tqdm
 
 def psearch(time, flux, min_p, max_p):
     '''
@@ -174,7 +176,7 @@ def detrend(dataset,campaign=5,splits=None,quiet=False,save_dir='.',seed=0,flux_
         if ds.nsets > 1:
             name = 'Worker {:d} <{:d}-{:d}>'.format(mpi_rank, dataset.epic, iset+1)
         random.seed(seed)
-        tstart = time()
+        tstart = clock()
         
         inputs = transpose([ds.time,ds.x,ds.y])
         detrender = Detrender(ds.fluxes[iset], inputs, mask=masks[iset],
@@ -193,15 +195,18 @@ def detrend(dataset,campaign=5,splits=None,quiet=False,save_dir='.',seed=0,flux_
             ## Global hyperparameter optimisation
             ## ----------------------------------
             print('Starting global hyperparameter optimisation using DE')
-            tstart_de = time()
-            for i,r in enumerate((de(de_niter))):
-                print('  DE iteration %3i -ln(L) %4.1f', i, de.minimum_value)
-                tcur_de = time()
+            tstart_de = clock()
+            pbar = pbar = tqdm((de(de_niter)),total=de_niter)
+
+            for i,r in enumerate(pbar):
+                # print('  DE iteration %3i -ln(L) %4.1f' % (i, de.minimum_value))
+                pbar.set_postfix({'-ln(L)':('%4.1f' % de.minimum_value)})
+                tcur_de = clock()
                 if ((de._fitness.ptp() < 3) or (tcur_de - tstart_de > de_max_time)) and (i>2):
                     break
-            print('  DE finished in %i seconds', tcur_de-tstart_de)
-            print('  DE minimum found at: %s', array_str(de.minimum_location, precision=3, max_line_width=250))
-            print('  DE -ln(L) %4.1f', de.minimum_value)
+            print('  DE finished in %i seconds' % (tcur_de-tstart_de))
+            print('  DE minimum found at: %s' % array_str(de.minimum_location, precision=3, max_line_width=250))
+            print('  DE -ln(L) %4.1f' % de.minimum_value)
 
             ## Local hyperparameter optimisation
             ## ---------------------------------
@@ -214,7 +219,7 @@ def detrend(dataset,campaign=5,splits=None,quiet=False,save_dir='.',seed=0,flux_
                 print('Local optimiser failed, %s' % e)
                 print('Skipping the file')
                 return
-            print('  Local minimum found at: %s', array_str(pv, precision=3))
+            print('  Local minimum found at: %s' % array_str(pv, precision=3))
 
             ## Trend computation
             ## -----------------
@@ -236,9 +241,9 @@ def detrend(dataset,campaign=5,splits=None,quiet=False,save_dir='.',seed=0,flux_
             ds.mflags[iset][~mhigh]  |= M_OUTLIER_U
             ds.mflags[iset][~mlow]   |= M_OUTLIER_D
 
-            print('  %5i too high', (~mhigh).sum())
-            print('  %5i too low',  (~mlow).sum())
-            print('  %5i not finite', (~minf).sum())
+            print('  %5i too high' % (~mhigh).sum())
+            print('  %5i too low'  % (~mlow).sum())
+            print('  %5i not finite' % (~minf).sum())
 
             ## Detrending and CDPP computation
             ## -------------------------------
@@ -248,7 +253,7 @@ def detrend(dataset,campaign=5,splits=None,quiet=False,save_dir='.',seed=0,flux_
             cdpp_t = cdpp(dd.unmasked_time, dd.unmasked_flux-tp,    exclude=~dd.mask)
             cdpp_c = cdpp(dd.unmasked_time, dd.unmasked_flux-tp-tt, exclude=~dd.mask)
         else:
-            print('Skipping dataset %i, not enough finite datapoints')
+            print('Skipping dataset %i, not enough finite datapoints' % iset)
             cdpp_r, cdpp_t, cdpp_c, warn = -1, -1, -1, -1
             mt, mp = nan, nan
             tt = full_like(detrender.data.unmasked_flux, nan)
@@ -257,10 +262,10 @@ def detrend(dataset,campaign=5,splits=None,quiet=False,save_dir='.',seed=0,flux_
             detrender.tr_pv = pv.copy()            
 
         result = Result(detrender, pv, tt+mt, tp+mp, cdpp_r, cdpp_t, cdpp_c, warn)
-        print('  CDPP - raw - %6.3f', cdpp_r)
-        print('  CDPP - position component removed - %6.3f', cdpp_t)
-        print('  CDPP - full reduction - %6.3f', cdpp_c)
-        print('Detrending time',time()-tstart)
+        print('  CDPP - raw - %6.3f' % cdpp_r)
+        print('  CDPP - position component removed - %6.3f' % cdpp_t)
+        print('  CDPP - full reduction - %6.3f' % cdpp_c)
+        print('Detrending time',(clock()-tstart))
         
         return result, detrender
 
@@ -289,23 +294,23 @@ class k2sc_lc(lightkurve.KeplerLightCurve):
         except:
             x, y = self.centroid_col, self.centroid_row
         dataset = K2Data(self.targetid,
-                 time = self.time,
+                 time = self.time.value,
                       cadence = self.cadenceno,
                       quality = self.quality,
-                      fluxes  = self.flux,
-                      errors  = self.flux_err,
+                      fluxes  = self.flux.value,
+                      errors  = self.flux_err.value,
                       x       = x,
                       y       = y,
-                      primary_header = self.primary_header,
-                      data_header = self.data_header,
+                      primary_header = self.hdu[0].header,
+                      data_header = self.hdu[1].header,
                       campaign=self.campaign)
         return dataset
 
     def k2sc(self,**kwargs):
         dataset = self.get_k2data()
         results, self.detrender = detrend(dataset,campaign=self.campaign,**kwargs) # see keyword arguments from detrend above
-        self.tr_position = results.tr_position
-        self.tr_time = results.tr_time 
+        self.tr_position = results.tr_position*self.flux.unit
+        self.tr_time = results.tr_time*self.flux.unit
         self.pv = results.pv # hyperparameters 
         self.corr_flux = self.flux - self.tr_position + nanmedian(self.tr_position) 
         self.cdpp_r = results.cdpp_r
