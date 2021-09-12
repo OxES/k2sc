@@ -44,7 +44,7 @@ where `<files>` is a list of files or a directory to be detrended (for example, 
 Citing
 ------
 
-If you use K2SC in your reserach, please cite
+If you use K2SC in your research, please cite
 
     Aigrain, S., Parviainen, H. & Pope, B. (2016, accepted to MNRAS), arXiv:1603.09167
 
