@@ -1,6 +1,6 @@
 # *K2* *S*ystematics *C*orrection
 
-[![Build Status](https://travis-ci.org/OxES/k2sc.svg?branch=master)](https://travis-ci.org/OxES/k2sc)
+[![integration](https://github.com/OxES/k2sc/actions/workflows/tests.yml/badge.svg)](https://github.com/OxES/k2sc/actions/workflows/tests.yml)
 [![Licence](http://img.shields.io/badge/license-GPLv3-blue.svg?style=flat)](http://www.gnu.org/licenses/gpl-3.0.html)
 [![MNRAS](https://img.shields.io/badge/MNRAS-10.1093%2Fmnras%2Fstv706-blue.svg)](https://doi.org/10.1093/mnras/stw706)
 [![arXiv](http://img.shields.io/badge/arXiv-1603.09167-blue.svg?style=flat)](http://arxiv.org/abs/1603.09167)
