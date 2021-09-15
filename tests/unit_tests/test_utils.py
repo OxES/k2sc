@@ -34,16 +34,16 @@ class TestSigmaClip(unittest.TestCase):
 
 
     def test_combined(self):
-        tmask = np.ones(self.npt, np.bool)
+        tmask = np.ones(self.npt, bool)
         tmask[self.badi] = 0
         m = sigma_clip(self.arr)
         npt.assert_array_equal(m,tmask)
 
 
     def test_separated(self):
-        tinf = np.ones(self.npt, np.bool)
-        thig = np.ones(self.npt, np.bool)
-        tlow = np.ones(self.npt, np.bool)
+        tinf = np.ones(self.npt, bool)
+        thig = np.ones(self.npt, bool)
+        tlow = np.ones(self.npt, bool)
 
         tinf[55] = 0
         thig[[23,34]] = 0
