@@ -1,0 +1,6 @@
+numpy 
+astropy
+scipy
+george>=0.3
+lightkurve
+tqdm
