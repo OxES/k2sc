@@ -290,6 +290,14 @@ class k2sc_lc(lightkurve.KeplerLightCurve):
 
     def get_k2data(self):
         try:
+            primary_header = self.hdu[0].header
+            data_header = self.hdu[1].header
+        except:
+            hdu = self.to_fits()
+            primary_header = hdu[0].header
+            data_header = hdu[1].header
+
+        try:
             x, y = self.pos_corr1, self.pos_corr2
         except:
             x, y = self.centroid_col, self.centroid_row
@@ -301,8 +309,8 @@ class k2sc_lc(lightkurve.KeplerLightCurve):
                       errors  = self.flux_err.value,
                       x       = x,
                       y       = y,
-                      primary_header = self.hdu[0].header,
-                      data_header = self.hdu[1].header,
+                      primary_header = primary_header,
+                      data_header = data_header,
                       campaign=self.campaign)
         return dataset
 
