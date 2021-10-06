@@ -49,7 +49,7 @@ class GeorgeGP(object):
     def negll(self, pv, y=None):
         y = y if y is not None else self._y
         self.compute(self._x, pv)
-        return -self._gp.lnlikelihood(y)
+        return -self._gp.lnlikelihood(y,quiet=True)
 
     def predict(self, x, mean_only=True):
         return self._gp.predict(self._y, x, mean_only=mean_only)

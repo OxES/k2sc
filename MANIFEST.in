@@ -1,0 +1,2 @@
+exclude notebooks/*
+exclude docs/*
