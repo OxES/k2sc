@@ -130,7 +130,10 @@ class SplitGP(GeorgeGP):
     def lnlikelihood(self, pv, y=None, x=None):
         self.compute(x, pv)
         self._compute_alpha(y)
-        return -(log(diag(self._L[0])).sum() + 0.5 * dot(y,self._alpha))
+        try:
+            return -(log(diag(self._L[0])).sum() + 0.5 * dot(y,self._alpha))
+        except (ValueError, LinAlgError):
+            return -np.inf
 
 
     def predict(self, x, mean_only=True):
