@@ -14,7 +14,7 @@ from numpy.random import permutation
 from matplotlib.pyplot import subplots, setp
 
 from numpy.linalg.linalg import LinAlgError
-from .gp import GeorgeGP, SplitGP
+from .gp import TinyGP, SplitGP
 from .kernels import BasicKernel
 from .utils import medsig
 from .dtdata import DtData
@@ -23,7 +23,7 @@ class Detrender(object):
     def __init__(self, flux, inputs, mask=None, p0=None, kernel=None, splits=[], tr_nrandom=200, tr_bspan=50, tr_nblocks=6):
         self.data   = DtData(flux, inputs, mask)
         self.kernel = kernel or BasicKernel()
-        self.gp     = SplitGP(self.kernel, splits) if splits is not None else GeorgeGP(self.kernel)
+        self.gp     = SplitGP(self.kernel, splits) if splits is not None else TinyGP(self.kernel)
         self.tr_data  = self.data.create_training_set(tr_nrandom, tr_bspan, tr_nblocks)
         self.gp.set_inputs(self.tr_data.masked_inputs)
 
