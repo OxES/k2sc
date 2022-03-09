@@ -18,6 +18,7 @@ from k2sc.utils import medsig, sigma_clip
 import lightkurve
 
 from tqdm import tqdm
+import matplotlib.pyplot as plt
 
 def psearch(time, flux, min_p, max_p):
     '''
@@ -138,6 +139,7 @@ def detrend(dataset,campaign=5,splits=None,quiet=False,save_dir='.',seed=0,flux_
             print('Starting Lomb-Scargle period search')
             nflux = flux - ptrend + nanmedian(ptrend)
             ntime = ds.time - ds.time.mean()
+            print(ntime[mask], nflux[mask])
             pflux = poly1d(polyfit(ntime[mask], nflux[mask], 9))(ntime)
 
             period, fap = psearch(ds.time[mask], (nflux-pflux)[mask], ls_min_period, ls_max_period)

@@ -35,6 +35,10 @@ from .priors import UniformPrior as UP
 from .priors import NormalPrior  as NP
 from .priors import LogNormPrior as LP
 
+from tinygp.transforms import Subspace
+
+
+
 class DtKernel(object):
     names  = []
     pv0    = array([])
@@ -45,14 +49,9 @@ class DtKernel(object):
     def __init__(self, p0=None, **kwargs):
         self._pv = asarray(p0) if p0 is not None else self.pv0
         self._pm = self.map_pv(self.pv0)
-        self._define_kernel()
-        self._nk1 = len(k1)
-        self._nk2 = len(k2)
-        self._sk1 = s_[:self._nk1]
-        self._sk2 = s_[self._nk1:-1]
+        self._define_kernel(self._pv)
         self.lims = np.transpose([p.lims for p in self.priors])
 
-        assert len(k) == self.npar - 1, "Expected and true number of kernel parameters do not match"
         assert len(self.names) == self.npar, "Number of parameter names doesn't match the number of parameters"
         assert len(self.priors) == self.npar, "Number of parameter priors doesn't match the number of parameters" 
         assert self.pv0.size == self.npar, "Number of parameter vector elements doesn't match the number of parameters"
@@ -91,23 +90,28 @@ class BasicKernel(DtKernel):
               UP(   -6,    0)]              ## 5 -- log10 white noise
     bounds = [[-5,-3],[0.01,0.6],[-5,-3],[2,20],[2,20],[-4,-2]] 
     
-    def _define_kernel(self):
-        pv = self.map_pv(self._pv)
-        k1 = pv[0] * ESK(1/pv[1], ndim=3, axes=0)
-        k2 = pv[2] * ESK(1/pv[3], ndim=3, axes=1) * ESK(1/pv[4], ndim=3, axes=2)
+    def _define_kernel(self,pv):
+        pv = self.map_pv(pv)
+        k1 = pv[0] * Subspace(0,ESK(pv[1]))
+        k2 = pv[2] * Subspace(1,ESK(pv[3])) * Subspace(2,ESK(pv[4]))
         kernel  = k1 + k2
         return kernel, k1, k2
 
     def map_pv(self, pv):
         # self._pm = 
-        pp = pv.copy()
-        pp[0] = 10**pv[0]
-        pp[1] =  1./pv[1]
-        pp[2] = 10**pv[2]
-        pp[3] =  1./pv[3]
-        pp[4] =  1./pv[4]
-        pp[5] = 10**pv[5]
-        return pp
+        return jnp.array([10**pv[0],
+            1./pv[1]**0.5,
+            10**pv[2],
+            1./pv[3]**0.5,
+            1./pv[4]**0.5,
+            10**pv[5]])
+        # pp[0] = 10**pv[0]
+        # pp[1] =  1./pv[1]**0.5
+        # pp[2] = 10**pv[2]
+        # pp[3] =  1./pv[3]**0.5
+        # pp[4] =  1./pv[4]**0.5
+        # pp[5] = 10**pv[5]
+        # return pp
     
 
 class BasicKernelEP(BasicKernel):
@@ -120,10 +124,10 @@ class BasicKernelEP(BasicKernel):
               NP(  10,   15, lims=[0,70]), ## 4 -- inverse y scale
               UP(  -6,    0)]              ## 5 -- glo10 white noise
 
-    def _define_kernel(self):
-        pv = self.map_pv(self._pv)
-        k1 = pv[0] * ESK(1/pv[1], ndim=3, axes=0)
-        k2 = pv[2] * EK(1/pv[3], ndim=3, axes=1) * EK(1/pv[4], ndim=3, axes=2)
+    def _define_kernel(self,pv):
+        pv = self.map_pv(pv)
+        k1 = pv[0] * Subspace(0,ESK(pv[1]))
+        k2 = pv[2] * Subspace(1,EK(pv[3])) * Subspace(2,EK(pv[4]))
         kernel   = k1 + k2
         return kernel, k1, k2
 
@@ -141,11 +145,11 @@ class PeriodicKernel(DtKernel):
         self._pv[2] = period
         self.set_pv(self._pv)
 
-    def _define_kernel(self):
-        pv = self.map_pv(self._pv)
-        k1 = pv[0] * ESn2K(gamma=pv[1], log_period=log(pv[2]), ndim=3, axes=0)
-        k2 = ( pv[3] * ESK(pv[4], ndim=3, axes=1) * ESK(pv[5], ndim=3, axes=2)
-                   + pv[6] * ESK(pv[7], ndim=3, axes=0))
+    def _define_kernel(self,pv):
+        pv = self.map_pv(pv)
+        k1 = pv[0] * Subspace(0,ESn2K(gamma=pv[1], log_period=log(pv[2])))
+        k2 = ( pv[3] * Subspace(1,ESK(pv[4])) * Subspace(2,ESK(pv[5]))
+                   + pv[6] * Subspace(0,ESK(pv[7])))
         k   = k1 + k2
         return kernel, k1, k2
 
@@ -174,24 +178,31 @@ class QuasiPeriodicKernel(BasicKernel):
         self._pv[3] = evolution_scale
         self.set_pv(self._pv)
 
-    def _define_kernel(self):
-        pv = self.map_pv(self._pv)
-        k1 = pv[0] * ESn2K(gamma=1/pv[1], log_period=log(pv[2]), ndim=3, axes=0) * ESK(1/pv[3], ndim=3, axes=0)
-        k2 = pv[4] * ESK(1/pv[5], ndim=3, axes=1) * ESK(1/pv[6], ndim=3, axes=2)
+    def _define_kernel(self,pv):
+        pv = self.map_pv(pv)
+        k1 = pv[0] * Subspace(0,ESn2K(gamma=pv[1], scale=(pv[2]))) * Subspace(0,ESK(pv[3]))
+        k2 = pv[4] * Subspace(1,ESK(pv[5])) * Subspace(2,ESK(pv[6]))
         kernel  = k1 + k2
         return kernel, k1, k2
 
     def map_pv(self, pv):
         # self._pm = 
-        pp = pv.copy()
-        pp[0] = 10**pv[0]
-        pp[1] =  1./pv[1]
-        pp[3] =  1./pv[3]
-        pp[4] = 10**pv[4]
-        pp[5] =  1./pv[5]
-        pp[6] =  1./pv[6]
-        pp[7] = 10**pv[7]
-        return pp
+        return jnp.array([10**pv[0],
+            1./pv[1]**0.5,
+            pv[2],
+            1./pv[3]**0.5,
+            10**pv[4],
+            1./pv[5]**0.5,
+            1./pv[6]**0.5,
+            10**pv[7]])
+        # pp[0] = 10**pv[0]
+        # pp[1] =  1./pv[1]**0.5
+        # pp[3] =  1./pv[3]**0.5
+        # pp[4] = 10**pv[4]
+        # pp[5] =  1./pv[5]**0.5
+        # pp[6] =  1./pv[6]**0.5
+        # pp[7] = 10**pv[7]
+        # return pp
 
 
 class QuasiPeriodicKernelEP(QuasiPeriodicKernel):
@@ -208,8 +219,8 @@ class QuasiPeriodicKernelEP(QuasiPeriodicKernel):
 
     def _define_kernel(self,pv):
         pv = self.map_pv(pv)
-        k1 = pv[0] * ESn2K(gamma=1/pv[1], log_period=log(pv[2]), ndim=3, axes=0) * ESK(1/pv[3], ndim=3, axes=0)
-        k2 = pv[4] * EK(1/pv[5], ndim=3, axes=1) * EK(1/pv[6], ndim=3, axes=2)
+        k1 = pv[0] * Subspace(0,ESn2K(gamma=pv[1], scale=(pv[2]))) * Subspace(0,ESK(pv[3]))
+        k2 = pv[4] * Subspace(1,EK(pv[5])) * Subspace(2,EK(pv[6]))
         kernel  = k1 + k2
         return kernel, k1, k2
     

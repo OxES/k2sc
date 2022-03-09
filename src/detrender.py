@@ -23,7 +23,9 @@ class Detrender(object):
     def __init__(self, flux, inputs, mask=None, p0=None, kernel=None, splits=[], tr_nrandom=200, tr_bspan=50, tr_nblocks=6):
         self.data   = DtData(flux, inputs, mask)
         self.kernel = kernel or BasicKernel()
-        self.gp     = SplitGP(self.kernel, splits) if splits is not None else TinyGP(self.kernel)
+        if np.isscalar(splits):
+            splits = [splits]
+        self.gp     = SplitGP(self.kernel, flux, np.nanmin(inputs[:,0]), np.nanmax(inputs[:,0]), splits) if splits is not None else TinyGP(self.kernel, flux)
         self.tr_data  = self.data.create_training_set(tr_nrandom, tr_bspan, tr_nblocks)
         self.gp.set_inputs(self.tr_data.masked_inputs)
 
@@ -43,12 +45,6 @@ class Detrender(object):
     ## =====================
     ##  Detrending routines
     ## =====================
-
-    def covariance_matrix(self, pv=None, inputs=None, separate=False):
-        inputs = inputs if inputs is not None else self.tr_data.masked_inputs
-        self.gp.compute(inputs, pv)
-        return self.gp._covariance_matrix(inputs, separate=separate)
-    
         
     def neglnposterior(self, pv, training=True):
         if any(pv < self.kernel.lims[0]) or any(self.kernel.lims[1] < pv):
@@ -70,15 +66,13 @@ class Detrender(object):
     
     def predict(self, pv, inputs=None, components=False, mean_only=True):
         inputs  = inputs if inputs is not None else self.data.unmasked_inputs
-        self.gp.compute(self.data.masked_inputs, pv)
-        self.gp._compute_alpha(self.data.masked_normalised_flux)
 
         if components:
-            mu_time, mu_pos = self.gp.predict_components(inputs)
+            mu_time, mu_pos = self.gp.predict_components(pv,inputs)
             return ((1. + mu_time) * self.data._fm,
                     (1. + mu_pos)  * self.data._fm)
         else:
-            return self.gp.predict(inputs, mean_only=mean_only)
+            return self.gp.predict(pv, inputs, mean_only=mean_only)
     
 
     def detrend_spatial(self, pv):
