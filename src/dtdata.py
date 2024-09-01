@@ -14,7 +14,7 @@ class DtData(object):
     def __init__(self, flux, inputs, mask=None):
         self._flux   = array(flux)
         self._inputs = array(inputs)
-        self._mask   = array(mask) if mask is not None else ones(self._flux.size, np.bool) 
+        self._mask   = array(mask) if mask is not None else ones(self._flux.size, bool) 
         self._fm, self._fs = medsig(self.masked_flux)
         self.nptm     = self.masked_flux.size
         self.nptu     = self.unmasked_flux.size
@@ -108,7 +108,7 @@ class DtData(object):
         mask = array(mask)
         assert mask.ndim == 1, 'The mask array for DtData should be 1D'
         assert mask.size == self.flux.size,  'The mask array for DtData should have the same size as the flux array'
-        assert mask.dtype == np.bool,  'The mask array should be boolean'
+        assert mask.dtype == bool,  'The mask array should be boolean'
         self._mask = mask
 
     @property
