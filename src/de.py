@@ -82,7 +82,7 @@ class DiffEvol(object):
         return res
 
     def __call__(self, ngen=1):
-        t = np.zeros(3, np.int)
+        t = np.zeros(3, int)
         
         for i in range(self.n_pop):
             self._fitness[i] = self.m * self.minfun(self._population[i,:])
