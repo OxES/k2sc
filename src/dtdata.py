@@ -60,7 +60,7 @@ class DtData(object):
         
         """
         ids = where(self.mask)[0]                    ## Get the masked indices
-        bstarts = np.full(nblocks, -bspan, np.int)   ## Starting indices for blocks
+        bstarts = np.full(nblocks, -bspan, int)   ## Starting indices for blocks
 
         ## Chunks
         ## ------
