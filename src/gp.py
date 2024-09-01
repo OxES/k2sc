@@ -95,7 +95,7 @@ class SplitGP(GeorgeGP):
     def _get_mask(self, t1, t2, splits=None):
         """Creates a covariance matrix mask based on a list of splits in time."""
         splits = self.splits if splits is None else splits
-        mask = zeros((t1.size,t2.size), np.bool)
+        mask = zeros((t1.size,t2.size), bool)
 
         o1,o2 = 0, 0
         for split in splits:
