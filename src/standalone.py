@@ -314,7 +314,7 @@ class k2sc_lc(lightkurve.KeplerLightCurve):
                       campaign=self.campaign)
         return dataset
 
-    def k2sc(self,**kwargs):
+    def k2sc(self, **kwargs):
         dataset = self.get_k2data()
         results, self.detrender = detrend(dataset,campaign=self.campaign,**kwargs) # see keyword arguments from detrend above
         self.tr_position = results.tr_position*self.flux.unit
