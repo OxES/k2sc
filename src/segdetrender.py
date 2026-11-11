@@ -1,84 +1,118 @@
-import scipy.linalg as sla
-from .detrender import *
+"""Deprecated compatibility shim for SegmentedDetrender.
+
+Use :class:`k2sc.detrender.Detrender` with ``splits=...`` instead.
+"""
+
+from __future__ import annotations
+
+import warnings
+
+import numpy as np
+
+from .dtdata import DtData
+from .gp import SplitGP
+from .kernels import BasicKernel
+
+try:
+    from .detrender import Detrender as _BaseDetrender
+except (ImportError, AttributeError):  # pragma: no cover - fallback before PR 4
+    _BaseDetrender = object
+
+warnings.warn(
+    "k2sc.segdetrender is deprecated and will be removed in a future release; "
+    "use k2sc.detrender.Detrender with splits=... instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 
-class SegmentedDetrender(Detrender):
-    def __init__(self,  flux, inputs, splits=[], mask=None, p0=None, tr_nrandom=100, tr_bspan=50, tr_nblocks=5):
-        super(SegmentedDetrender, self).__init__(flux, inputs, mask, p0, tr_nrandom, tr_bspan, tr_nblocks)
-        self.splits = splits
+class SegmentedDetrender(_BaseDetrender):
+    """Deprecated compatibility wrapper around :class:`k2sc.detrender.Detrender`."""
 
+    def __init__(
+        self,
+        flux,
+        inputs,
+        splits=None,
+        mask=None,
+        p0=None,
+        kernel=None,
+        tr_nrandom: int = 100,
+        tr_bspan: int = 50,
+        tr_nblocks: int = 5,
+    ):
+        warnings.warn(
+            "SegmentedDetrender is deprecated; use Detrender(..., splits=...) instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        splits_list = [] if splits is None else list(splits)
+        self.splits = splits_list
+        self.data = DtData(flux, inputs, mask=mask)
+        self.kernel = kernel if kernel is not None else BasicKernel(p0=p0)
+        self.gp = SplitGP(self.kernel, splits=splits_list)
+        self.tr_data = self.data.create_training_set(
+            nrandom=tr_nrandom,
+            nblocks=tr_nblocks,
+            bspan=tr_bspan,
+        )
+        self.gp.set_inputs(self.tr_data.masked_inputs)
 
-    def _get_mask(self, t1, t2, splits=None):
-        """Creates a covariance matrix mask based on a list of splits in time."""
-        splits = self.splits if splits is None else splits
-        mask = zeros((t1.size,t2.size), np.bool)
-        o1,o2 = 0, 0
-        for split in splits:
-            e1 = (where(t1 < split)[0]).max() + 1
-            e2 = (where(t2 < split)[0]).max() + 1
-            mask[o1:e1,o2:e2] = 1
-            o1,o2 = e1,e2
-        mask[o1:,o2:] = 1
-        return mask
+    def _get_mask(self, t1, t2, splits=None) -> np.ndarray:
+        """Create a boolean piecewise-segment covariance mask from split timestamps."""
+        active_splits = self.splits if splits is None else splits
+        t1_arr = np.asarray(t1, dtype=np.float64).ravel()
+        t2_arr = np.asarray(t2, dtype=np.float64).ravel()
+        if not active_splits:
+            return np.ones((t1_arr.size, t2_arr.size), dtype=bool)
+        splits_arr = np.sort(np.asarray(active_splits, dtype=np.float64).ravel())
+        seg1 = np.sum(t1_arr[:, None] > splits_arr[None, :], axis=1)
+        seg2 = np.sum(t2_arr[:, None] > splits_arr[None, :], axis=1)
+        return seg1[:, None] == seg2[None, :]
 
+    def compute_cmat(
+        self,
+        pv,
+        X1,
+        X2=None,
+        separate: bool = False,
+        add_wn: bool = False,
+        splits=None,
+    ):
+        if splits is not None:
+            self.gp.splits = splits
+        return self.gp._covariance_matrix(
+            X1,
+            X2,
+            pv=pv,
+            separate=separate,
+            add_wn=add_wn,
+        )
 
-    def compute_cmat(self, pv, X1, X2, separate=False, add_wn=False, splits=None):
-        splits = self.splits if splits is None else splits
-        if pv is not None:
-            self.set_pv(pv)
+    def negll(self, pv=None, flux=None, inputs=None, splits=None) -> float:
+        if splits is not None:
+            self.gp.splits = splits
+        y = flux if flux is not None else self.data.masked_normalised_flux
+        x = inputs if inputs is not None else self.data.masked_inputs
+        return self.gp.negll(pv, y=y, x=x)
 
-        K1 = self._k1.value(X1, X2)
-        K2 = self._k2.value(X1, X2)
-        if splits:
-            t1 = X1[:,0].flatten()
-            t2 = X2[:,0].flatten()
-            K2 *= self._get_mask(t1, t2, splits)
+    def compute_gp(self, pv=None, inputs=None) -> None:
+        x = inputs if inputs is not None else self.data.masked_inputs
+        self.gp.compute(x=x, pv=pv)
 
-        if separate:
-            return K1, K2
-        else:
-            if add_wn:
-                return K1 + K2 + self._pv[-1]**2 * identity(K1.shape[0])
-            else:
-                return K1 + K2
-
-
-    def negll(self, pv=None, flux=None, inputs=None, splits=None):
-        flux = flux if flux is not None else self.data.masked_normalised_flux
-        inputs = inputs if inputs is not None else self.data.masked_inputs
-        K = self.compute_cmat(pv, inputs, inputs, splits=splits, add_wn=True)
-        L = sla.cho_factor(K)
-        b = sla.cho_solve(L, flux)
-        return log(diag(L[0])).sum() + 0.5 * dot(flux,b)
-
-
-    def compute_gp(self, pv=None, inputs=None):
-        if pv is not None:
-            self.set_pv(pv)
-
-
-    def predict(self, pv, flux=None, inputs=None, inputs_pred=None, mean_only=True, splits=None):
-        flux = flux if flux is not None else self.data.masked_flux
-        iptr = inputs if inputs is not None else self.data.masked_inputs
-        ippr = inputs_pred if inputs_pred is not None else iptr
-
-        K0 = self.compute_cmat(pv, iptr, iptr, add_wn=False, splits=splits)
-        K  = K0 + self._pv[-1]**2 * identity(K0.shape[0])
-        if inputs_pred is None:
-            Ks  = K0.copy()
-            Kss = K.copy()
-        else:
-            Ks  = self.compute_cmat(pv, ippr, ippr, add_wn=False, splits=splits)
-            Kss = self.compute_cmat(pv, ippr, ippr, add_wn=True, splits=splits)
-
-        L = sla.cho_factor(K)
-        b = sla.cho_solve(L, flux)
-        mu = dot(Ks, b)
-
-        if mean_only:
-            return mu
-        else:
-            b = sla.cho_solve(L, Ks.T)
-            cov = Kss - dot(Ks, b)
-            err = np.sqrt(diag(cov))
-            return mu, err
+    def predict(
+        self,
+        pv,
+        flux=None,
+        inputs=None,
+        inputs_pred=None,
+        mean_only: bool = True,
+        splits=None,
+    ):
+        if splits is not None:
+            self.gp.splits = splits
+        y = flux if flux is not None else self.data.masked_normalised_flux
+        x_tr = inputs if inputs is not None else self.data.masked_inputs
+        x_pr = inputs_pred if inputs_pred is not None else x_tr
+        self.gp.compute(x=x_tr, pv=pv)
+        return self.gp.predict(x_pr, mean_only=mean_only, y=y)
