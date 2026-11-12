@@ -10,6 +10,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
+import astropy.io.fits as pf
 import numpy as np
 from scipy.ndimage import median_filter
 
@@ -1029,6 +1030,59 @@ def detrend_k2data(
         inputs = np.column_stack([ds.time, u1, u2])
     else:
         inputs = np.column_stack([ds.time, ds.x, ds.y])
+
+    if ds.data_header is None:
+        ds.data_header = pf.Header()
+    ds.data_header["ROLL_PCA"] = (
+        bool(roll_pca),
+        "Spatial GP fitted in PCA roll coordinates",
+    )
+    if pca_tf is not None:
+        ds.data_header["PCA_CX"] = (
+            float(pca_tf.center_xy[0]),
+            "Roll PCA x centre [pix]",
+        )
+        ds.data_header["PCA_CY"] = (
+            float(pca_tf.center_xy[1]),
+            "Roll PCA y centre [pix]",
+        )
+        ds.data_header["PCA_R11"] = (
+            float(pca_tf.rotation[0, 0]),
+            "Roll PCA rotation R[0,0]",
+        )
+        ds.data_header["PCA_R12"] = (
+            float(pca_tf.rotation[0, 1]),
+            "Roll PCA rotation R[0,1]",
+        )
+        ds.data_header["PCA_R21"] = (
+            float(pca_tf.rotation[1, 0]),
+            "Roll PCA rotation R[1,0]",
+        )
+        ds.data_header["PCA_R22"] = (
+            float(pca_tf.rotation[1, 1]),
+            "Roll PCA rotation R[1,1]",
+        )
+        ds.data_header["PCA_S1"] = (
+            float(pca_tf.scales_u[0]),
+            "Roll PCA u1 4-MAD scale [pix]",
+        )
+        ds.data_header["PCA_S2"] = (
+            float(pca_tf.scales_u[1]),
+            "Roll PCA u2 4-MAD scale [pix]",
+        )
+    else:
+        for _pca_key in (
+            "PCA_CX",
+            "PCA_CY",
+            "PCA_R11",
+            "PCA_R12",
+            "PCA_R21",
+            "PCA_R22",
+            "PCA_S1",
+            "PCA_S2",
+        ):
+            ds.data_header.pop(_pca_key, None)
+
     fap_thresh = 10.0 ** float(ls_max_fap)
 
     fit_masks: list[np.ndarray] = []

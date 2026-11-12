@@ -421,6 +421,10 @@ class K2SCCorrector(_BaseCorrector):
             "K2SC_COVARIATES": str(self.covariate_source),
             "K2SC_ROLL_PCA": bool(roll_pca),
         }
+        if res.pca_transform is not None:
+            meta_updates["K2SC_PCA_CENTER"] = res.pca_transform.center_xy.copy()
+            meta_updates["K2SC_PCA_ROTATION"] = res.pca_transform.rotation.copy()
+            meta_updates["K2SC_PCA_SCALES"] = res.pca_transform.scales_u.copy()
         if res.ls_period is not None:
             meta_updates["K2SC_LS_PERIOD"] = float(res.ls_period)
         if res.ls_fap is not None:

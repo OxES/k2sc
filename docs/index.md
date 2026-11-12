@@ -105,6 +105,7 @@ Pass `optimizer` in Python or `--optimizer` on the command line alongside a dete
 # Single file, directory, or @filelist batch input
 k2sc ktwo211436265-c05_llc.fits --save-dir ./out
 k2sc @filelist.txt -c 5 --flux-type pdc --optimizer auto --seed 0 --save-dir ./out
+k2sc ktwo211436265-c05_llc.fits --no-roll-pca --save-dir ./out_raw_xy
 
 # MPI parallel execution (requires k2sc[mpi])
 mpirun -n 8 k2sc ./campaign05_fits/ -c 5 --save-dir ./out --logfile k2sc.log
@@ -119,12 +120,13 @@ k2mastify ./out_pdc ./out_sap ./hlsp_out --release-version 2
 
 ## Mathematical Summary
 
-`k2sc` decomposes normalized relative flux along $\mathbf{x} = (t, x, y)$ into an astrophysical time GP and a piecewise-segmented spatial GP:
+`k2sc` decomposes normalized relative flux along $\mathbf{x} = (t, \tilde{u}_1, \tilde{u}_2)$ into an astrophysical time GP and a piecewise-segmented spatial GP:
 
-$$f(t, x, y) = f_{\mathrm{time}}(t) + f_{\mathrm{pos}}(x, y; t) + \epsilon, \qquad \epsilon \sim \mathcal{N}(0, 10^{2 p_{-1}}).$$
+$$f(t, x, y) = f_{\mathrm{time}}(t) + f_{\mathrm{pos}}(\tilde{u}_1, \tilde{u}_2; t) + \epsilon, \qquad \epsilon \sim \mathcal{N}(0, 10^{2 p_{-1}}).$$
 
+- **Spacecraft-Roll PCA Normalization (`k2sc.pca`, `roll_pca=True` default):** Because K2 `(POS_CORR1, POS_CORR2)` centroids are collinear along the spacecraft roll arc while orthogonal thermal/focus drift spans only millipixels, `k2sc` rotates `(x, y)` into a right-handed $\mathrm{SO}(2)$ roll frame around the robust median $(\mu_x, \mu_y)$ (seeded by spherical PCA and refined with iterative $5\sigma_{\mathrm{MAD}}$ principal-axis trimming) and normalizes each axis by $s_k = 4\sigma_{\mathrm{MAD}}(u_k)$ so $[-2\sigma_k, +2\sigma_k] \mapsto [-0.5, +0.5]$. Pass `roll_pca=False` (or `--no-roll-pca` on the CLI) to fit in raw `(x, y)` coordinates. The fitted `RollPCATransform` is stored on `K2SCResult.pca_transform`, recorded in `LightCurve.meta` (`K2SC_ROLL_PCA`, `K2SC_PCA_CENTER`, `K2SC_PCA_ROTATION`, `K2SC_PCA_SCALES`), and written to the `K2SC` FITS extension header (`ROLL_PCA`, `PCA_CX`, `PCA_CY`, `PCA_R11`..`PCA_R22`, `PCA_S1`, `PCA_S2`) while keeping physical detector `(x, y)` columns unchanged.
 - **`SplitGP` & `PiecewiseSpatialKernel`:** Spatial covariances are multiplied by $M_{\mathrm{seg}}(t, t'; \mathbf{s}) = \mathbb{I}(c(t) = c(t'))$ where $c(t) = \sum_k \mathbb{I}(t > s_k)$, guaranteeing positive semidefiniteness across roll-angle breakpoint splits $\mathbf{s}$ and masked cadences.
-- **Kernels:** Provides `BasicKernel` (`basic`), `BasicKernelEP` (`basic_ep`), `QuasiPeriodicKernel` (`quasiperiodic`), `QuasiPeriodicKernelEP` (`quasiperiodic_ep`), and `PeriodicKernel` (`periodic`), with strictly positive-semidefinite harmonic complexity $\Gamma(p_1) = 1/p_1 > 0$ and zero-lag autodiff-safe `SafeL1Distance` exponential metrics.
+- **Kernels:** Provides `BasicKernel` (`basic`), `BasicKernelEP` (`basic_ep`), `QuasiPeriodicKernel` (`quasiperiodic`), `QuasiPeriodicKernelEP` (`quasiperiodic_ep`), and `PeriodicKernel` (`periodic`), with spatial hyperparameters (`x_iscale`, `y_iscale` / `x_scale`, `y_scale` in `ExpSquared(scale=1/sqrt(p))` and `Exp(scale=1/sqrt(p))`) parameterizing inverse-squared length-scales in normalized $(\tilde{u}_1, \tilde{u}_2)$ coordinates, strictly positive-semidefinite harmonic complexity $\Gamma(p_1) = 1/p_1 > 0$, and zero-lag autodiff-safe `SafeL1Distance` exponential metrics.
 
 ---
 
