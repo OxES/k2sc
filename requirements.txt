@@ -1,6 +1,9 @@
-numpy 
-astropy
-scipy
-george>=0.3
-lightkurve
-tqdm
+numpy>=1.26
+scipy>=1.11
+astropy>=5.3
+jax>=0.4.35
+jaxlib>=0.4.35
+tinygp>=0.3.0
+equinox>=0.11.5
+matplotlib>=3.8
+tqdm>=4.65
