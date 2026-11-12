@@ -1,326 +1,145 @@
-from k2sc.core import *
-from k2sc.k2io import DataReader
-from k2sc.k2data import K2Data
-from k2sc.ls import fasper
-from numpy import *
-import math as mt
-from time import time as clock, sleep
-from k2sc.cdpp import cdpp
-from k2sc.de import DiffEvol
-from numpy.random import normal
+"""Backward-compatibility standalone entry points and deprecated ``k2sc_lc`` shim."""
+
+from __future__ import annotations
+
 import warnings
-from collections import namedtuple
+from typing import Any
 
-from k2sc.detrender import Detrender
-from k2sc.kernels import kernels, BasicKernel, BasicKernelEP, QuasiPeriodicKernel, QuasiPeriodicKernelEP
-from k2sc.utils import medsig, sigma_clip
+import numpy as np
 
-import lightkurve
+from .corrector import (
+    HAS_LIGHTKURVE,
+    K2SCCorrector,
+    KeplerLightCurve,
+    _extract_quality_array,
+    _lookup_lc_column,
+    _to_float64_array,
+)
+from .k2data import K2Data
+from .ls import psearch
+from .pipeline import K2SCResult, SCResult, detrend
 
-from tqdm import tqdm
-
-def psearch(time, flux, min_p, max_p):
-    '''
-    Search for a statistically significant period using a Lomb-Scargle periodogram.
-    '''
-    freq,power,nout,jmax,prob = fasper(time, flux, 6, 0.5)
-    period = 1/freq
-    m = (period > min_p) & (period < max_p) 
-    period, power = period[m], power[m]
-    j = argmax(power)
-
-    expy = mt.exp(-power[j])
-    effm = 2*nout/6
-    fap  = expy*effm
-
-    if fap > 0.01:
-        fap = 1.0-(1.0-expy)**effm
-    
-    return period[j], fap
-
-def detrend(dataset,campaign=5,splits=None,quiet=False,save_dir='.',seed=0,flux_type='pdc',default_position_kernel='SqrExp',
-           kernel=None, kernel_period=None,p_mask_center=None,p_mask_period=None,p_mask_duration=None,
-           tr_nrandom=400,tr_nblocks=6,tr_bspan=50,de_npop=100,de_niter=150,de_max_time=300,
-           ls_max_fap=-50,ls_min_period=0.05,ls_max_period=25,  outlier_sigma=5,outlier_mwidth=25):
-    '''This is a function to detrend a single k2sc dataset, outside of the framework of 
-    logging that is in bin/k2sc, but duplicating the functionality of the
-    local function there 'detrend'. This is here to permit access to k2sc from lightkurve, or other
-    similar light curve wrapping packages that might like to use k2sc.
-
-    Arguments
-
-    campaign: Number of the K2 campaign.
-    splits: time values to split the light curve into separate segments for systematics - if you have a campaign, it will choose default splits from default_splits.
-    quiet: does not currently do anything.
-    save_dir: directory to save results. Default is current directory.
-    seed: seed for random number draws for optimization.
-    flux_type: either 'sap' or 'pdc'. Use either the Simple Aperture Photometry or the Presearch Data Conditioning (ie Kepler pipeline corrected) lightcurve as input.
-    default_position_kernel: which kernel should we use for the GP in position? Defaults to squared exponential.
-    kernel: set a time kernel explicitly. If this is None, then it finds this automatically by checking for periodicity and choosing either a periodic or a basic (squared exponential) kernel. \
-        options are 'quasiperiodic', 'basic_ep', 'periodic', 'quasiperiodic_ep', 'basic'.
-    kernel_period: if you are using a kernel with periodicity, this lets you set the periodicity manually.
-    p_mask_center, p_mask_period, ,p_mask_duration: mask a planet transit out from the GP fitting by setting its zero-epoch, period and duration. All three must be set.
-    tr_random, tr_nblocks, tr_bspan: When training the GP, the light curve is broken up into random blocks. These give the number of random samples, number of sample blocks, and span of a single block.\
-        Do not change this unless you know what you are doing - but it can be useful if you have very long or short light curves and are getting errors.
-    de_npop, de_niter, de_max_time: settings for the Differential Evolution global optimizer. Cut down one or all of these numbers to spend less time searching for a global optimum - at your peril.
-    ls_max_fap, ls_min_period, ls_max_period: In searching for a period with a Lomb-Scargle periodogram, this sets the maximum Lomb-Scargle log10(false alarm) threshold to use the periodic kernel, \
-        and min and max periods to search.
-    outlier_sigma, outlier_mwidth: The sigma and window width to be used in outlier clipping.
-
-    '''
-
-    ## Setup the logger
-    ## ----------------
-    ds   = dataset
-    Result  = namedtuple('SCResult', 'detrender pv tr_time tr_position cdpp_r cdpp_t cdpp_c warn')
-    results = []  # a list of Result tuples, one per aperture
-    masks   = []  # a list of light curve masks, one per aperture 
+_BaseLC = KeplerLightCurve if (HAS_LIGHTKURVE and KeplerLightCurve is not None) else object
 
 
-    ## Define the splits
-    ## -----------------
+class k2sc_lc(_BaseLC):  # type: ignore[misc,valid-type]
+    """Deprecated Lightkurve subclass shim retained for legacy notebook compatibility.
 
-    default_splits = {3:[2154,2190], 4:[2240,2273], 5:[2344], 6:[2390,2428], 7:[2468.5,2515],8:[2579,2598.5],102:[2778],11:[2830],12:[2915,2951],
-                      13:[2998,3033],14:[3085,3123.75],15:[3170,3207.5],16:[3297.5,3331],17:[3367,3400],18:[3425,3460]}
+    Use ``K2SCCorrector(lc).correct()`` or ``k2sc.detrend(lc)`` instead.
+    """
 
-    if splits is None and ds.campaign not in default_splits.keys():
-        print('The campaign not known and no splits given.')
-    elif splits is not None:
-        splits = splits
-        print('Using split values {:s} given from the command line'.format(str(splits)))
-    else:
-        splits = default_splits[ds.campaign]
-        print('Using default splits {:s} for campaign {:d}'.format(str(splits), ds.campaign))
+    def __init__(self, *args: Any, **kwargs: Any):
+        warnings.warn(
+            "`k2sc_lc` is deprecated and will be removed in a future release; "
+            "use `k2sc.K2SCCorrector(lc).correct()` or `k2sc.detrend(lc)` instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        if not HAS_LIGHTKURVE:
+            raise ImportError(
+                "`k2sc_lc` requires 'lightkurve>=2.4'. Install it via `pip install 'k2sc[lightkurve]'`."
+            )
+        super().__init__(*args, **kwargs)
 
-    ## Periodic signal masking
-    ## -----------------------
-    if p_mask_center and p_mask_period and p_mask_duration:
-        ds.mask_periodic_signal(p_mask_center, p_mask_period, p_mask_duration)
+    def get_k2data(self) -> K2Data:
+        """Construct a ``K2Data`` instance from this LightCurve (deprecated)."""
+        warnings.warn(
+            "`k2sc_lc.get_k2data()` is deprecated; use `k2sc.K2SCCorrector(lc)` instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        time_arr = _to_float64_array(self.time).ravel()
+        n_pts = time_arr.size
 
-    ## Initial outlier and period detection
-    ## ------------------------------------
-    ## We carry out an initial outlier and period detection using
-    ## a default GP hyperparameter vector based on campaign 4 fits
-    ## done using (almost) nonprintrmative priors.
+        cad_col = _lookup_lc_column(self, "cadenceno")
+        cadence = (
+            _extract_quality_array(cad_col, n_pts)
+            if cad_col is not None
+            else np.arange(n_pts, dtype=np.int32)
+        )
+        qual_col = _lookup_lc_column(self, "quality")
+        quality = _extract_quality_array(qual_col, n_pts)
 
-    for iset in range(ds.nsets):
-        flux = ds.fluxes[iset]
-        mask  = isfinite(flux) 
-        mask &= ~(ds.mflags[iset] & M_PERIODIC).astype(bool)  # Apply the transit mask, if any
-        mask &= ~(ds.quality & 2**20).astype(bool)            # Mask out the thruster firings
-        inputs = transpose([ds.time, ds.x, ds.y])
-        masks.append(mask)
+        flux_arr = _to_float64_array(self.flux).ravel()
+        err_col = _lookup_lc_column(self, "flux_err")
+        err_arr = (
+            _to_float64_array(err_col).ravel()
+            if err_col is not None
+            else np.zeros_like(flux_arr)
+        )
 
-        detrender = Detrender(flux, inputs, mask = mask, splits = splits,
-                              kernel = BasicKernelEP(),
-                              tr_nrandom = tr_nrandom,
-                              tr_nblocks = tr_nblocks,
-                              tr_bspan = tr_bspan)
-    
-        ttrend,ptrend = detrender.predict(detrender.kernel.pv0+1e-5, components=True)
-        cflux = flux-ptrend+median(ptrend)-ttrend+median(ttrend)
-        cflux /= nanmedian(cflux)
+        x_arr, y_arr, cov_arr, _src = K2SCCorrector._resolve_lc_covariates(self)
+        if cov_arr is not None:
+            x_arr = cov_arr[:, 0]
+            y_arr = cov_arr[:, 1] if cov_arr.shape[1] > 1 else np.zeros_like(x_arr)
+        assert x_arr is not None and y_arr is not None
 
-        ## Iterative sigma-clipping
-        ## ------------------------
-        print('Starting initial outlier detection')
-        omask = mask & sigma_clip(cflux, max_iter=10, max_sigma=5, mexc=mask)
-        ofrac = (~omask).sum() / omask.size
-        if ofrac < 0.25:
-            mask &= omask
-            print('  Flagged %i (%4.1f%%) outliers.' % ((~omask).sum(), 100*ofrac))
-        else:
-            print('  Found %i (%4.1f%%) outliers. Not flagging.' % ((~omask).sum(), 100*ofrac))
-
-        ## Lomb-Scargle period search
-        ## --------------------------
-        if ofrac < 0.9:
-            print('Starting Lomb-Scargle period search')
-            nflux = flux - ptrend + nanmedian(ptrend)
-            ntime = ds.time - ds.time.mean()
-            pflux = poly1d(polyfit(ntime[mask], nflux[mask], 9))(ntime)
-
-            period, fap = psearch(ds.time[mask], (nflux-pflux)[mask], ls_min_period, ls_max_period)
-        
-            if fap < 1e-50:
-                ds.is_periodic = True
-                ds.ls_fap    = fap
-                ds.ls_period = period
-        else:
-            print('Too many outliers, skipping the Lomb-Scargle period search')
-
-    ## Kernel selection
-    ## ----------------
-    if kernel:
-        print('Overriding automatic kernel selection, using %s kernel as given in the command line' % kernel)
-        if 'periodic' in kernel and not kernel_period:
-            print('Need to give period (--kernel-period) if overriding automatic kernel detection with a periodic kernel. Quitting.')
-            return 0
-        kernel = kernels[kernel](period=kernel_period)
-    else:
-        print('  Using %s position kernel' % default_position_kernel)
-        if ds.is_periodic:
-            print('  Found periodicity p = {:7.2f} (fap {:7.4e} < 1e-50), will use a quasiperiodic kernel'.format(ds.ls_period, ds.ls_fap))
-        else:
-            print('  No strong periodicity found, using a basic kernel')
-
-        if default_position_kernel.lower() == 'sqrexp':
-            kernel = QuasiPeriodicKernel(period=ds.ls_period)   if ds.is_periodic else BasicKernel() 
-        else:
-            kernel = QuasiPeriodicKernelEP(period=ds.ls_period) if ds.is_periodic else BasicKernelEP()
-
-
-    ## Detrending
-    ## ----------
-    for iset in range(ds.nsets):
-        if ds.nsets > 1:
-            name = 'Worker {:d} <{:d}-{:d}>'.format(mpi_rank, dataset.epic, iset+1)
-        random.seed(seed)
-        tstart = clock()
-        
-        inputs = transpose([ds.time,ds.x,ds.y])
-        detrender = Detrender(ds.fluxes[iset], inputs, mask=masks[iset],
-                              splits=splits, kernel=kernel, tr_nrandom=tr_nrandom,
-                              tr_nblocks=tr_nblocks, tr_bspan=tr_bspan)
-        de = DiffEvol(detrender.neglnposterior, kernel.bounds, de_npop)
-
-        ## Period population generation
-        ## ----------------------------
-        if isinstance(kernel, QuasiPeriodicKernel):
-            de._population[:,2] = clip(normal(kernel.period, 0.1*kernel.period, size=de.n_pop),
-                                          ls_min_period, ls_max_period)
-        ## Hyperparameter optimisation
-        ## ---------------------------
-        if isfinite(ds.fluxes[iset]).sum() >= 100:
-            ## Global hyperparameter optimisation
-            ## ----------------------------------
-            print('Starting global hyperparameter optimisation using DE')
-            tstart_de = clock()
-            pbar = pbar = tqdm((de(de_niter)),total=de_niter)
-
-            for i,r in enumerate(pbar):
-                # print('  DE iteration %3i -ln(L) %4.1f' % (i, de.minimum_value))
-                pbar.set_postfix({'-ln(L)':('%4.1f' % de.minimum_value)})
-                tcur_de = clock()
-                if ((de._fitness.ptp() < 3) or (tcur_de - tstart_de > de_max_time)) and (i>2):
-                    break
-            print('  DE finished in %i seconds' % (tcur_de-tstart_de))
-            print('  DE minimum found at: %s' % array_str(de.minimum_location, precision=3, max_line_width=250))
-            print('  DE -ln(L) %4.1f' % de.minimum_value)
-
-            ## Local hyperparameter optimisation
-            ## ---------------------------------
-            print('Starting local hyperparameter optimisation')
-            try:
-                with warnings.catch_warnings():
-                    warnings.filterwarnings('ignore', category=RuntimeWarning, append=True)
-                    pv, warn = detrender.train(de.minimum_location)
-            except ValueError as e:
-                print('Local optimiser failed, %s' % e)
-                print('Skipping the file')
-                return
-            print('  Local minimum found at: %s' % array_str(pv, precision=3))
-
-            ## Trend computation
-            ## -----------------
-            (mt,tt),(mp,tp) = map(lambda a: (nanmedian(a), a-nanmedian(a)), detrender.predict(pv, components=True))
-
-            ## Iterative sigma-clipping
-            ## ------------------------
-            print('Starting final outlier detection')
-            flux = detrender.data.unmasked_flux
-            cflux = flux-tp-tt
-            cflux /= nanmedian(cflux)
-
-            mper = ~(ds.mflags[iset] & M_PERIODIC).astype(bool)  # Apply the transit mask, if any
-            mthf = ~(ds.quality & 2**20).astype(bool)            # Mask out the thruster firings
-            # minf = isfinite(cflux)
-
-            minf, mlow, mhigh = sigma_clip(cflux, max_iter = 10, max_sigma = 5, separate_masks = True, mexc = mper&mthf)
-            ds.mflags[iset][~minf]  |= M_NOTFINITE
-            ds.mflags[iset][~mhigh]  |= M_OUTLIER_U
-            ds.mflags[iset][~mlow]   |= M_OUTLIER_D
-
-            print('  %5i too high' % (~mhigh).sum())
-            print('  %5i too low'  % (~mlow).sum())
-            print('  %5i not finite' % (~minf).sum())
-
-            ## Detrending and CDPP computation
-            ## -------------------------------
-            print('Computing time and position trends')
-            dd = detrender.data
-            cdpp_r = cdpp(dd.masked_time,   dd.masked_flux)
-            cdpp_t = cdpp(dd.unmasked_time, dd.unmasked_flux-tp,    exclude=~dd.mask)
-            cdpp_c = cdpp(dd.unmasked_time, dd.unmasked_flux-tp-tt, exclude=~dd.mask)
-        else:
-            print('Skipping dataset %i, not enough finite datapoints' % iset)
-            cdpp_r, cdpp_t, cdpp_c, warn = -1, -1, -1, -1
-            mt, mp = nan, nan
-            tt = full_like(detrender.data.unmasked_flux, nan)
-            tp = full_like(detrender.data.unmasked_flux, nan)
-            pv = full(kernel.npar, nan)
-            detrender.tr_pv = pv.copy()            
-
-        result = Result(detrender, pv, tt+mt, tp+mp, cdpp_r, cdpp_t, cdpp_c, warn)
-        print('  CDPP - raw - %6.3f' % cdpp_r)
-        print('  CDPP - position component removed - %6.3f' % cdpp_t)
-        print('  CDPP - full reduction - %6.3f' % cdpp_c)
-        print('Detrending time',(clock()-tstart))
-        
-        return result, detrender
-
-class k2sc_lc(lightkurve.KeplerLightCurve):
-    '''
-    This class is a wrapper for lightkurve (github.com/KeplerGO/lightkurve) so it can call k2sc. This is a work in progress at both ends and the aim is currently to include TessLightCurve objects as well.
-
-    Example use is shown in k2sc/notebooks/lightkurve.py, where you will want to instantiate a k2sc_lc object by
-
-    tpf = KeplerTargetPixelFile.from_archive(212300977) # WASP-55
-    lc = tpf.to_lightcurve() # load some data either as a tpf or just straight up as a lightcurve
-    lc = lc.remove_nans() # don't know why the quality flags are weird
-    lc.primary_header = tpf.hdu[0].header
-    lc.data_header = tpf.hdu[1].header
-    lc.pos_corr1 = tpf.hdu[1].data['POS_CORR1'][tpf.quality_mask]
-    lc.pos_corr2 = tpf.hdu[1].data['POS_CORR2'][tpf.quality_mask]
-    
-    # now the magic happens
-    lc.__class__ = k2sc_lc
-    lc.k2sc()
-    '''
-
-    def get_k2data(self):
+        target_id = getattr(self, "targetid", None)
+        if target_id is None:
+            target_id = (getattr(self, "meta", {}) or {}).get("TARGETID", 0)
         try:
-            primary_header = self.hdu[0].header
-            data_header = self.hdu[1].header
-        except:
-            hdu = self.to_fits()
-            primary_header = hdu[0].header
-            data_header = hdu[1].header
+            epic = int(target_id)
+        except (TypeError, ValueError):
+            epic = 0
 
-        try:
-            x, y = self.pos_corr1, self.pos_corr2
-        except:
-            x, y = self.centroid_col, self.centroid_row
-        dataset = K2Data(self.targetid,
-                 time = self.time.value,
-                      cadence = self.cadenceno,
-                      quality = self.quality,
-                      fluxes  = self.flux.value,
-                      errors  = self.flux_err.value,
-                      x       = x,
-                      y       = y,
-                      primary_header = primary_header,
-                      data_header = data_header,
-                      campaign=self.campaign)
-        return dataset
+        campaign = getattr(self, "campaign", None)
+        if campaign is None:
+            campaign = (getattr(self, "meta", {}) or {}).get("CAMPAIGN", None)
 
-    def k2sc(self, **kwargs):
-        dataset = self.get_k2data()
-        results, self.detrender = detrend(dataset,campaign=self.campaign,**kwargs) # see keyword arguments from detrend above
-        self.tr_position = results.tr_position*self.flux.unit
-        self.tr_time = results.tr_time*self.flux.unit
-        self.pv = results.pv # hyperparameters 
-        self.corr_flux = self.flux - self.tr_position + nanmedian(self.tr_position) 
-        self.cdpp_r = results.cdpp_r
-        self.cdpp_t = results.cdpp_t
-        self.cdpp_c = results.cdpp_c
+        primary_header = getattr(self, "primary_header", None)
+        data_header = getattr(self, "data_header", None)
+
+        return K2Data(
+            epic,
+            time=time_arr,
+            cadence=cadence,
+            quality=quality,
+            fluxes=flux_arr,
+            errors=err_arr,
+            x=x_arr,
+            y=y_arr,
+            primary_header=primary_header,
+            data_header=data_header,
+            campaign=campaign,
+        )
+
+    def k2sc(self, **kwargs: Any):
+        """Detrend in-place by delegating to ``K2SCCorrector`` (deprecated)."""
+        warnings.warn(
+            "`lc.k2sc()` / `k2sc_lc` monkeypatching is deprecated; "
+            "use `k2sc.K2SCCorrector(lc).correct()` or `k2sc.detrend(lc)` instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        if not HAS_LIGHTKURVE:
+            raise ImportError(
+                "`k2sc_lc` requires 'lightkurve>=2.4'. Install it via `pip install 'k2sc[lightkurve]'`."
+            )
+
+        kw = dict(kwargs)
+        kw.pop("save_dir", None)
+        kw.pop("flux_type", None)
+        x = kw.pop("x", None)
+        y = kw.pop("y", None)
+        covariates = kw.pop("covariates", None)
+
+        corr = K2SCCorrector(self, x=x, y=y, covariates=covariates)
+        clc = corr.correct(**kw)
+        assert corr.result is not None
+
+        for attr_name, attr_val in (
+            ("detrender", corr.detrender),
+            ("tr_position", corr.tr_position),
+            ("tr_time", corr.tr_time),
+            ("pv", corr.pv),
+            ("corr_flux", clc.flux),
+            ("cdpp_r", corr.cdpp_r),
+            ("cdpp_t", corr.cdpp_t),
+            ("cdpp_c", corr.cdpp_c),
+            ("k2sc_result", corr.result),
+        ):
+            object.__setattr__(self, attr_name, attr_val)
+        return clc
+
+
+__all__ = ["K2SCResult", "SCResult", "detrend", "k2sc_lc", "psearch"]
