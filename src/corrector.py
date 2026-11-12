@@ -313,6 +313,7 @@ class K2SCCorrector(_BaseCorrector):
         kernel: str | DtKernel | None = None,
         kernel_period: float | None = None,
         default_position_kernel: str = "SqrExp",
+        roll_pca: bool = True,
         transit_mask: tuple[float, float, float] | np.ndarray | None = None,
         p_mask_center: float | None = None,
         p_mask_period: float | None = None,
@@ -374,6 +375,7 @@ class K2SCCorrector(_BaseCorrector):
             kernel=kernel,
             kernel_period=kernel_period,
             default_position_kernel=default_position_kernel,
+            roll_pca=roll_pca,
             tr_nrandom=tr_nrandom,
             tr_nblocks=tr_nblocks,
             tr_bspan=tr_bspan,
@@ -417,6 +419,7 @@ class K2SCCorrector(_BaseCorrector):
             "K2SC_WARN": bool(res.warn),
             "K2SC_PERIODIC": bool(res.is_periodic),
             "K2SC_COVARIATES": str(self.covariate_source),
+            "K2SC_ROLL_PCA": bool(roll_pca),
         }
         if res.ls_period is not None:
             meta_updates["K2SC_LS_PERIOD"] = float(res.ls_period)
@@ -591,9 +594,13 @@ class K2SCCorrector(_BaseCorrector):
             mappable = ax.scatter(x_full[fin], y_full[fin], c=pos_rel[fin], s=16)
 
         if res.detrender is not None:
+            tr_x = res.detrender.tr_data.mx
+            tr_y = res.detrender.tr_data.my
+            if res.pca_transform is not None:
+                tr_x, tr_y = res.pca_transform.inverse_transform(tr_x, tr_y)
             ax.plot(
-                res.detrender.tr_data.mx,
-                res.detrender.tr_data.my,
+                tr_x,
+                tr_y,
                 "o",
                 ms=3,
                 color="k",

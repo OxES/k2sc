@@ -35,6 +35,7 @@ from .kernels import (
 )
 from .ls import fasper
 from .optimizers import OptimizationResult
+from .pca import RollPCATransform, pca_normalize_xy
 from .utils import fold, sigma_clip
 
 ensure_float64()
@@ -84,6 +85,7 @@ class K2SCResult:
     ls_fap: float | None
     opt_result: OptimizationResult | None
     lightcurve: Any | None = None
+    pca_transform: RollPCATransform | None = None
 
     def _legacy_tuple(self) -> tuple[Any, ...]:
         return (
@@ -673,6 +675,7 @@ def detrend_array(
     kernel: str | DtKernel | None = None,
     kernel_period: float | None = None,
     default_position_kernel: str = "SqrExp",
+    roll_pca: bool = True,
     tr_nrandom: int = 400,
     tr_nblocks: int = 6,
     tr_bspan: int = 50,
@@ -792,10 +795,20 @@ def detrend_array(
     if not np.any(valid_coords):
         raise ValueError("No cadences with simultaneously finite time and spatial covariates.")
 
+    pca_tf: RollPCATransform | None = None
+    if roll_pca:
+        clean_pca = valid_coords & np.isfinite(flux_full) & q_fit_full & cmask_full
+        u1_full, u2_full, pca_tf = pca_normalize_xy(
+            x_full, y_full, clean_mask=clean_pca
+        )
+        x_v = u1_full[valid_coords]
+        y_v = u2_full[valid_coords]
+    else:
+        x_v = x_full[valid_coords]
+        y_v = y_full[valid_coords]
+
     time_v = time_full[valid_coords]
     flux_v = flux_full[valid_coords]
-    x_v = x_full[valid_coords]
-    y_v = y_full[valid_coords]
     inputs_v = np.column_stack([time_v, x_v, y_v])
     mflags_v = mflags_full[valid_coords].copy()
 
@@ -921,6 +934,7 @@ def detrend_array(
         ls_fap=ls_fap,
         opt_result=opt_res,
         lightcurve=None,
+        pca_transform=pca_tf,
     )
 
 
@@ -932,6 +946,7 @@ def detrend_k2data(
     quiet: bool = False,
     seed: int | np.random.Generator | None = 0,
     default_position_kernel: str = "SqrExp",
+    roll_pca: bool = True,
     kernel: str | DtKernel | None = None,
     kernel_period: float | None = None,
     transit_mask=None,
@@ -995,8 +1010,25 @@ def detrend_k2data(
                     f"ds.npoints ({ds.npoints}) nor raw length ({ds.nanmask.size})."
                 )
 
-    inputs = np.column_stack([ds.time, ds.x, ds.y])
     mthf = (ds.quality & _K2_THRUSTER_FLAG) == 0
+    pca_tf: RollPCATransform | None = None
+    if roll_pca:
+        has_finite_flux = (
+            np.any(np.isfinite(ds.fluxes), axis=0)
+            if ds.fluxes.size > 0
+            else np.zeros(ds.time.size, dtype=bool)
+        )
+        clean_pca = (
+            np.isfinite(ds.time)
+            & np.isfinite(ds.x)
+            & np.isfinite(ds.y)
+            & mthf
+            & has_finite_flux
+        )
+        u1, u2, pca_tf = pca_normalize_xy(ds.x, ds.y, clean_mask=clean_pca)
+        inputs = np.column_stack([ds.time, u1, u2])
+    else:
+        inputs = np.column_stack([ds.time, ds.x, ds.y])
     fap_thresh = 10.0 ** float(ls_max_fap)
 
     fit_masks: list[np.ndarray] = []
@@ -1120,6 +1152,7 @@ def detrend_k2data(
                 ls_fap=ds.ls_fap,
                 opt_result=opt_res_i,
                 lightcurve=None,
+                pca_transform=pca_tf,
             )
         )
 
@@ -1145,6 +1178,7 @@ def detrend(
     seed: int | np.random.Generator | None = 0,
     flux_type: str = "pdc",
     default_position_kernel: str = "SqrExp",
+    roll_pca: bool = True,
     kernel: str | DtKernel | None = None,
     kernel_period: float | None = None,
     p_mask_center: float | None = None,
@@ -1192,6 +1226,7 @@ def detrend(
             kernel=kernel,
             kernel_period=kernel_period,
             default_position_kernel=default_position_kernel,
+            roll_pca=roll_pca,
             transit_mask=transit_mask,
             p_mask_center=p_mask_center,
             p_mask_period=p_mask_period,
@@ -1227,6 +1262,7 @@ def detrend(
             quiet=quiet,
             seed=seed,
             default_position_kernel=default_position_kernel,
+            roll_pca=roll_pca,
             kernel=kernel,
             kernel_period=kernel_period,
             transit_mask=transit_mask,
@@ -1276,6 +1312,7 @@ def detrend(
         kernel=kernel,
         kernel_period=kernel_period,
         default_position_kernel=default_position_kernel,
+        roll_pca=roll_pca,
         tr_nrandom=tr_nrandom,
         tr_nblocks=tr_nblocks,
         tr_bspan=tr_bspan,
