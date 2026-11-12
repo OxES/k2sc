@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import functools
 import warnings
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -11,11 +12,38 @@ import numpy as np
 import tinygp
 
 from ._jax_env import as_f64, ensure_float64
-from .kernels import DtKernel, build_tinygp_kernels, pad_splits
+from .kernels import (
+    _WHITE_NOISE_IDX,
+    KERNEL_BASIC,
+    KERNEL_BASIC_EP,
+    KERNEL_PERIODIC,
+    KERNEL_QUASIPERIODIC,
+    KERNEL_QUASIPERIODIC_EP,
+    DtKernel,
+    K2SCKernel,
+    _normalize_kernel_id,
+    _safe_abs,
+    build_tinygp_kernels,
+    pad_splits,
+)
 
 ensure_float64()
 
 _JITTER_LADDER = (1e-12, 1e-10, 1e-8)
+_LN10 = float(np.log(10.0))
+
+
+class PrecomputedPairwise(NamedTuple):
+    """Precomputed pairwise distance and split-segment tensors for a fixed training set."""
+
+    dt: jax.Array
+    dt2: jax.Array
+    dx: jax.Array
+    dx2: jax.Array
+    dy: jax.Array
+    dy2: jax.Array
+    same_seg: jax.Array
+    eye_n: jax.Array
 
 
 class _BlockMaskedKernel(tinygp.kernels.Kernel):
@@ -28,6 +56,20 @@ class _BlockMaskedKernel(tinygp.kernels.Kernel):
         val = self.base_kernel.evaluate(X1[:-1], X2[:-1])
         return jnp.where(m > 0.0, m * val, jnp.zeros_like(val))
 
+    def evaluate_diag(self, X: jax.Array) -> jax.Array:
+        m2 = X[-1] * X[-1]
+        val = self.base_kernel.evaluate_diag(X[:-1])
+        return jnp.where(m2 > 0.0, m2 * val, jnp.zeros_like(val))
+
+    def __call__(self, X1: jax.Array, X2: jax.Array | None = None) -> jax.Array:
+        if X2 is None:
+            m2 = jnp.square(X1[:, -1])
+            val = self.base_kernel(X1[:, :-1])
+            return jnp.where(m2 > 0.0, m2 * val, jnp.zeros_like(val))
+        m = X1[:, -1:] * X2[None, :, -1]
+        val = self.base_kernel(X1[:, :-1], X2[:, :-1])
+        return jnp.where(m > 0.0, m * val, jnp.zeros_like(val))
+
 
 def _shift_time_origin(
     X: jax.Array,
@@ -37,6 +79,274 @@ def _shift_time_origin(
     X_rel = X.at[:, 0].add(-t_ref)
     splits_rel = jnp.where(jnp.isfinite(splits_padded), splits_padded - t_ref, splits_padded)
     return X_rel, splits_rel
+
+
+@jax.jit
+def precompute_pairwise_jax(
+    X_fit: jax.Array,
+    splits_padded: jax.Array,
+) -> PrecomputedPairwise:
+    """Precompute pairwise coordinate differences and split block mask for fixed X_fit."""
+    X_arr = as_f64(X_fit)
+    s_arr = as_f64(splits_padded)
+    n = X_arr.shape[0]
+    if n > 0:
+        t_ref = jnp.where(
+            jnp.isfinite(X_arr[0, 0]),
+            X_arr[0, 0],
+            jnp.asarray(0.0, dtype=jnp.float64),
+        )
+    else:
+        t_ref = jnp.asarray(0.0, dtype=jnp.float64)
+
+    X_rel, splits_rel = _shift_time_origin(X_arr, s_arr, t_ref)
+    t_rel = X_rel[:, 0]
+    dt = _safe_abs(t_rel[:, None] - t_rel[None, :])
+    dt2 = jnp.square(dt)
+    dx = _safe_abs(X_rel[:, 1:2] - X_rel[None, :, 1])
+    dx2 = jnp.square(dx)
+    dy = _safe_abs(X_rel[:, 2:3] - X_rel[None, :, 2])
+    dy2 = jnp.square(dy)
+    seg = jnp.sum(t_rel[:, None] > splits_rel[None, :], axis=-1)
+    same_seg = seg[:, None] == seg[None, :]
+    eye_n = jnp.eye(n, dtype=jnp.float64)
+    return PrecomputedPairwise(
+        dt=dt,
+        dt2=dt2,
+        dx=dx,
+        dx2=dx2,
+        dy=dy,
+        dy2=dy2,
+        same_seg=same_seg,
+        eye_n=eye_n,
+    )
+
+
+def _assemble_precomputed_components(
+    p: jax.Array,
+    precomp: PrecomputedPairwise,
+    kid: int,
+):
+    if kid == KERNEL_BASIC:
+        K1 = (10.0 ** p[0]) * jnp.exp(-0.5 * p[1] * precomp.dt2)
+        K2_raw = (10.0 ** p[2]) * jnp.exp(
+            -0.5 * (p[3] * precomp.dx2 + p[4] * precomp.dy2)
+        )
+        K2 = jnp.where(precomp.same_seg, K2_raw, 0.0)
+        diag = 10.0 ** (2.0 * p[5])
+        return K1, None, K2, None, None, None, diag
+
+    if kid == KERNEL_BASIC_EP:
+        K1 = (10.0 ** p[0]) * jnp.exp(-0.5 * p[1] * precomp.dt2)
+        K2_raw = (10.0 ** p[2]) * jnp.exp(
+            -jnp.sqrt(p[3]) * precomp.dx - jnp.sqrt(p[4]) * precomp.dy
+        )
+        K2 = jnp.where(precomp.same_seg, K2_raw, 0.0)
+        diag = 10.0 ** (2.0 * p[5])
+        return K1, None, K2, None, None, None, diag
+
+    if kid == KERNEL_QUASIPERIODIC:
+        u = jnp.pi * precomp.dt / p[2]
+        s = jnp.sin(u)
+        c = jnp.cos(u)
+        s2 = jnp.square(s)
+        K1 = (10.0 ** p[0]) * jnp.exp(-s2 / p[1] - 0.5 * p[3] * precomp.dt2)
+        K2_raw = (10.0 ** p[4]) * jnp.exp(
+            -0.5 * (p[5] * precomp.dx2 + p[6] * precomp.dy2)
+        )
+        K2 = jnp.where(precomp.same_seg, K2_raw, 0.0)
+        diag = 10.0 ** (2.0 * p[7])
+        return K1, None, K2, s, c, s2, diag
+
+    if kid == KERNEL_QUASIPERIODIC_EP:
+        u = jnp.pi * precomp.dt / p[2]
+        s = jnp.sin(u)
+        c = jnp.cos(u)
+        s2 = jnp.square(s)
+        K1 = (10.0 ** p[0]) * jnp.exp(-s2 / p[1] - 0.5 * p[3] * precomp.dt2)
+        K2_raw = (10.0 ** p[4]) * jnp.exp(
+            -jnp.sqrt(p[5]) * precomp.dx - jnp.sqrt(p[6]) * precomp.dy
+        )
+        K2 = jnp.where(precomp.same_seg, K2_raw, 0.0)
+        diag = 10.0 ** (2.0 * p[7])
+        return K1, None, K2, s, c, s2, diag
+
+    if kid == KERNEL_PERIODIC:
+        u = jnp.pi * precomp.dt / p[2]
+        s = jnp.sin(u)
+        c = jnp.cos(u)
+        s2 = jnp.square(s)
+        K1a = (10.0 ** p[0]) * jnp.exp(-s2 / p[1])
+        K1b = (10.0 ** p[3]) * jnp.exp(-0.5 * p[4] * precomp.dt2)
+        K2_raw = (10.0 ** p[5]) * jnp.exp(
+            -0.5 * (p[6] * precomp.dx2 + p[7] * precomp.dy2)
+        )
+        K2 = jnp.where(precomp.same_seg, K2_raw, 0.0)
+        diag = 10.0 ** (2.0 * p[8])
+        return K1a, K1b, K2, s, c, s2, diag
+
+    raise ValueError(f"Unknown kernel_id: {kid!r}")
+
+
+def _eval_gp_lnlike_precomputed_raw(
+    pv: jax.Array,
+    precomp: PrecomputedPairwise,
+    y_fit: jax.Array,
+    kernel_id: int | str,
+) -> jax.Array:
+    """Fast forward Gaussian log-likelihood using precomputed pairwise tensors."""
+    p = as_f64(pv)
+    y = as_f64(y_fit)
+    kid = _normalize_kernel_id(kernel_id)
+    n = y.shape[0]
+    if n == 0:
+        return jnp.asarray(0.0, dtype=jnp.float64)
+
+    K1a, K1b, K2, _, _, _, diag = _assemble_precomputed_components(p, precomp, kid)
+    K1 = K1a if K1b is None else (K1a + K1b)
+    K = K1 + K2 + diag * precomp.eye_n
+
+    L = jax.scipy.linalg.cholesky(K, lower=True)
+    z = jax.scipy.linalg.solve_triangular(L, y, lower=True)
+    diag_L = jnp.diag(L)
+    valid_L = jnp.all(jnp.isfinite(L)) & jnp.all(diag_L > 0.0)
+    safe_diag_L = jnp.where(valid_L, diag_L, jnp.ones_like(diag_L))
+    lp = (
+        -0.5 * jnp.dot(z, z)
+        - jnp.sum(jnp.log(safe_diag_L))
+        - 0.5 * n * jnp.log(2.0 * jnp.pi)
+    )
+    return jnp.where(valid_L & jnp.isfinite(lp), lp, -jnp.inf)
+
+
+eval_gp_lnlike_precomputed_jax = functools.partial(
+    jax.jit, static_argnames=("kernel_id",)
+)(_eval_gp_lnlike_precomputed_raw)
+
+
+def _eval_gp_lnlike_and_grad_precomputed_raw(
+    pv: jax.Array,
+    precomp: PrecomputedPairwise,
+    y_fit: jax.Array,
+    kernel_id: int | str,
+) -> tuple[jax.Array, jax.Array]:
+    """Exact analytic Gaussian log-likelihood and gradient via Cholesky sensitivity W."""
+    p = as_f64(pv)
+    y = as_f64(y_fit)
+    kid = _normalize_kernel_id(kernel_id)
+    n = y.shape[0]
+    if n == 0:
+        return jnp.asarray(0.0, dtype=jnp.float64), jnp.zeros_like(p)
+
+    K1a, K1b, K2, s, c, s2, diag = _assemble_precomputed_components(p, precomp, kid)
+    K1 = K1a if K1b is None else (K1a + K1b)
+    K = K1 + K2 + diag * precomp.eye_n
+
+    L = jax.scipy.linalg.cholesky(K, lower=True)
+    z = jax.scipy.linalg.solve_triangular(L, y, lower=True)
+    diag_L = jnp.diag(L)
+    valid_L = jnp.all(jnp.isfinite(L)) & jnp.all(diag_L > 0.0)
+    safe_diag_L = jnp.where(valid_L, diag_L, jnp.ones_like(diag_L))
+    lp = (
+        -0.5 * jnp.dot(z, z)
+        - jnp.sum(jnp.log(safe_diag_L))
+        - 0.5 * n * jnp.log(2.0 * jnp.pi)
+    )
+
+    alpha = jax.scipy.linalg.solve_triangular(L, z, lower=True, trans=1)
+    K_inv_raw = jax.scipy.linalg.cho_solve((L, True), precomp.eye_n)
+    K_inv = 0.5 * (K_inv_raw + K_inv_raw.T)
+    W = 0.5 * (jnp.outer(alpha, alpha) - K_inv)
+    tr_W = jnp.trace(W)
+    WK2 = W * K2
+    g_wn = 2.0 * _LN10 * diag * tr_W
+
+    if kid == KERNEL_BASIC:
+        WK1 = W * K1a
+        grad = jnp.stack(
+            [
+                _LN10 * jnp.sum(WK1),
+                -0.5 * jnp.sum(WK1 * precomp.dt2),
+                _LN10 * jnp.sum(WK2),
+                -0.5 * jnp.sum(WK2 * precomp.dx2),
+                -0.5 * jnp.sum(WK2 * precomp.dy2),
+                g_wn,
+            ]
+        )
+    elif kid == KERNEL_BASIC_EP:
+        WK1 = W * K1a
+        grad = jnp.stack(
+            [
+                _LN10 * jnp.sum(WK1),
+                -0.5 * jnp.sum(WK1 * precomp.dt2),
+                _LN10 * jnp.sum(WK2),
+                (-0.5 / jnp.sqrt(p[3])) * jnp.sum(WK2 * precomp.dx),
+                (-0.5 / jnp.sqrt(p[4])) * jnp.sum(WK2 * precomp.dy),
+                g_wn,
+            ]
+        )
+    elif kid == KERNEL_QUASIPERIODIC:
+        assert s is not None and c is not None and s2 is not None
+        WK1 = W * K1a
+        grad = jnp.stack(
+            [
+                _LN10 * jnp.sum(WK1),
+                (1.0 / jnp.square(p[1])) * jnp.sum(WK1 * s2),
+                (2.0 * jnp.pi / (p[1] * jnp.square(p[2])))
+                * jnp.sum(WK1 * (s * c * precomp.dt)),
+                -0.5 * jnp.sum(WK1 * precomp.dt2),
+                _LN10 * jnp.sum(WK2),
+                -0.5 * jnp.sum(WK2 * precomp.dx2),
+                -0.5 * jnp.sum(WK2 * precomp.dy2),
+                g_wn,
+            ]
+        )
+    elif kid == KERNEL_QUASIPERIODIC_EP:
+        assert s is not None and c is not None and s2 is not None
+        WK1 = W * K1a
+        grad = jnp.stack(
+            [
+                _LN10 * jnp.sum(WK1),
+                (1.0 / jnp.square(p[1])) * jnp.sum(WK1 * s2),
+                (2.0 * jnp.pi / (p[1] * jnp.square(p[2])))
+                * jnp.sum(WK1 * (s * c * precomp.dt)),
+                -0.5 * jnp.sum(WK1 * precomp.dt2),
+                _LN10 * jnp.sum(WK2),
+                (-0.5 / jnp.sqrt(p[5])) * jnp.sum(WK2 * precomp.dx),
+                (-0.5 / jnp.sqrt(p[6])) * jnp.sum(WK2 * precomp.dy),
+                g_wn,
+            ]
+        )
+    elif kid == KERNEL_PERIODIC:
+        assert K1b is not None and s is not None and c is not None and s2 is not None
+        WK1a = W * K1a
+        WK1b = W * K1b
+        grad = jnp.stack(
+            [
+                _LN10 * jnp.sum(WK1a),
+                (1.0 / jnp.square(p[1])) * jnp.sum(WK1a * s2),
+                (2.0 * jnp.pi / (p[1] * jnp.square(p[2])))
+                * jnp.sum(WK1a * (s * c * precomp.dt)),
+                _LN10 * jnp.sum(WK1b),
+                -0.5 * jnp.sum(WK1b * precomp.dt2),
+                _LN10 * jnp.sum(WK2),
+                -0.5 * jnp.sum(WK2 * precomp.dx2),
+                -0.5 * jnp.sum(WK2 * precomp.dy2),
+                g_wn,
+            ]
+        )
+    else:
+        raise ValueError(f"Unknown kernel_id: {kid!r}")
+
+    ok = valid_L & jnp.isfinite(lp) & jnp.all(jnp.isfinite(grad))
+    safe_lp = jnp.where(valid_L & jnp.isfinite(lp), lp, -jnp.inf)
+    safe_grad = jnp.where(ok, grad, jnp.zeros_like(grad))
+    return safe_lp, safe_grad
+
+
+eval_gp_lnlike_and_grad_precomputed_jax = functools.partial(
+    jax.jit, static_argnames=("kernel_id",)
+)(_eval_gp_lnlike_and_grad_precomputed_raw)
 
 
 def _eval_gp_lnlike_raw(
@@ -52,14 +362,19 @@ def _eval_gp_lnlike_raw(
     p_arr = as_f64(pv)
     s_arr = as_f64(splits_padded)
 
-    t_ref = jnp.where(
-        (X_arr.shape[0] > 0) & jnp.isfinite(X_arr[0, 0]),
-        X_arr[0, 0],
-        jnp.asarray(0.0, dtype=jnp.float64),
-    )
+    if X_arr.shape[0] > 0:
+        t_ref = jnp.where(
+            jnp.isfinite(X_arr[0, 0]),
+            X_arr[0, 0],
+            jnp.asarray(0.0, dtype=jnp.float64),
+        )
+    else:
+        t_ref = jnp.asarray(0.0, dtype=jnp.float64)
     X_rel, splits_rel = _shift_time_origin(X_arr, s_arr, t_ref)
-    k1, k2, diag = build_tinygp_kernels(p_arr, splits_rel, kernel_id)
-    gp = tinygp.GaussianProcess(k1 + k2, X_rel, diag=diag)
+    kid = _normalize_kernel_id(kernel_id)
+    k_tot = K2SCKernel(p_arr, splits_rel, kid)
+    diag = 10.0 ** (2.0 * p_arr[_WHITE_NOISE_IDX[kid]])
+    gp = tinygp.GaussianProcess(k_tot, X_rel, diag=diag)
     lp = gp.log_probability(y_arr)
     return jnp.where(jnp.isfinite(lp), lp, -jnp.inf)
 
@@ -96,10 +411,12 @@ def eval_gp_lnlike_masked_jax(
     X_clean = jnp.where(mask_bool[:, None], X_rel, 0.0)
     y_clean = jnp.where(mask_bool, y_arr, 0.0)
 
-    k1, k2, diag = build_tinygp_kernels(p_arr, splits_rel, kernel_id)
+    kid = _normalize_kernel_id(kernel_id)
+    k_tot = K2SCKernel(p_arr, splits_rel, kid)
+    diag = 10.0 ** (2.0 * p_arr[_WHITE_NOISE_IDX[kid]])
     X_aug = jnp.concatenate([X_clean, m[:, None]], axis=1)
     diag_aug = m * diag + (1.0 - m)
-    gp = tinygp.GaussianProcess(_BlockMaskedKernel(k1 + k2), X_aug, diag=diag_aug)
+    gp = tinygp.GaussianProcess(_BlockMaskedKernel(k_tot), X_aug, diag=diag_aug)
 
     n_masked = X_arr.shape[0] - jnp.sum(m)
     lp = gp.log_probability(y_clean) + 0.5 * n_masked * jnp.log(2.0 * jnp.pi)
@@ -134,10 +451,12 @@ def predict_components_masked_jax(
     X_clean = jnp.where(mask_bool[:, None], X_rel, 0.0)
     y_clean = jnp.where(mask_bool, y_arr, 0.0)
 
-    k1, k2, diag = build_tinygp_kernels(p_arr, splits_rel, kernel_id)
+    kid = _normalize_kernel_id(kernel_id)
+    k1, k2, diag = build_tinygp_kernels(p_arr, splits_rel, kid)
+    k_tot = K2SCKernel(p_arr, splits_rel, kid)
     X_aug = jnp.concatenate([X_clean, m[:, None]], axis=1)
     diag_aug = m * diag + (1.0 - m)
-    gp = tinygp.GaussianProcess(_BlockMaskedKernel(k1 + k2), X_aug, diag=diag_aug)
+    gp = tinygp.GaussianProcess(_BlockMaskedKernel(k_tot), X_aug, diag=diag_aug)
 
     alpha_aug = gp.solver.solve_triangular(gp.solver.solve_triangular(y_clean), transpose=True)
     alpha_masked = jnp.where(mask_bool, alpha_aug, 0.0)
@@ -176,15 +495,18 @@ def _jit_build_gp(
     jax.Array,
     jax.Array,
 ]:
-    t_ref = jnp.where(
-        (X_jax.shape[0] > 0) & jnp.isfinite(X_jax[0, 0]),
-        X_jax[0, 0],
-        jnp.asarray(0.0, dtype=jnp.float64),
-    )
+    if X_jax.shape[0] > 0:
+        t_ref = jnp.where(
+            jnp.isfinite(X_jax[0, 0]),
+            X_jax[0, 0],
+            jnp.asarray(0.0, dtype=jnp.float64),
+        )
+    else:
+        t_ref = jnp.asarray(0.0, dtype=jnp.float64)
     X_rel, splits_rel = _shift_time_origin(X_jax, splits_pad, t_ref)
     k1, k2, diag_scalar = build_tinygp_kernels(pv, splits_rel, kernel_id)
-    k_tot = k1 + k2
-    k0_diag = jax.vmap(k_tot.evaluate_diag)(X_rel)
+    k_tot = K2SCKernel(pv, splits_rel, kernel_id)
+    k0_diag = k_tot(X_rel)
     diag_vec = jnp.where(
         jitter > 0.0,
         diag_scalar + jitter * k0_diag,
@@ -240,7 +562,6 @@ def _jit_cross_and_components(
     X_q_rel = jnp.where(valid_q[:, None], X_q_safe.at[:, 0].add(-t_ref), 0.0)
 
     k1, k2, diag_scalar = build_tinygp_kernels(pv, splits_rel, kernel_id)
-    k_tot = k1 + k2
     Ks1 = k1(X_q_rel, X_rel)
     Ks2 = k2(X_q_rel, X_rel)
     Ks = Ks1 + Ks2
@@ -249,7 +570,7 @@ def _jit_cross_and_components(
     mu_time_raw = jnp.where(valid_q, Ks1 @ alpha, jnp.nan)
     mu_pos_raw = jnp.where(valid_q, Ks2 @ alpha, jnp.nan)
     m0 = jnp.nanmedian(mu_pos_raw)
-    kss_diag = jax.vmap(k_tot.evaluate_diag)(X_q_rel) + diag_scalar
+    kss_diag = k1(X_q_rel) + k2(X_q_rel) + diag_scalar
     return mu, mu_time_raw + m0, mu_pos_raw - m0, Ks, kss_diag, valid_q
 
 
