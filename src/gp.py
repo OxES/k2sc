@@ -339,7 +339,7 @@ def _eval_gp_lnlike_and_grad_precomputed_raw(
         raise ValueError(f"Unknown kernel_id: {kid!r}")
 
     ok = valid_L & jnp.isfinite(lp) & jnp.all(jnp.isfinite(grad))
-    safe_lp = jnp.where(valid_L & jnp.isfinite(lp), lp, -jnp.inf)
+    safe_lp = jnp.where(ok, lp, -jnp.inf)
     safe_grad = jnp.where(ok, grad, jnp.zeros_like(grad))
     return safe_lp, safe_grad
 

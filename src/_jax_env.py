@@ -1,12 +1,14 @@
-"""JAX float64 precision configuration and array validation utilities."""
+"""JAX float64 precision configuration and worker environment utilities."""
 
 from __future__ import annotations
 
 import os
+import sys
 import warnings
+from typing import TYPE_CHECKING
 
-import jax
-import jax.numpy as jnp
+if TYPE_CHECKING:
+    import jax
 
 _SINGLE_THREAD_ENV_VARS = (
     "OMP_NUM_THREADS",
@@ -15,18 +17,18 @@ _SINGLE_THREAD_ENV_VARS = (
     "VECLIB_MAXIMUM_THREADS",
     "NUMEXPR_NUM_THREADS",
 )
-_XLA_SINGLE_THREAD_FLAGS = (
-    "--xla_cpu_multi_thread_eigen=false intra_op_parallelism_threads=1"
-)
+_XLA_SINGLE_THREAD_FLAGS = "--xla_cpu_multi_thread_eigen=false"
 
 
 def configure_single_thread_env() -> None:
     """Configure BLAS/OpenMP/XLA environment variables for single-threaded worker processes.
 
-    Uses ``os.environ.setdefault`` so explicit caller overrides are respected, and
-    appends single-thread Eigen flags to ``XLA_FLAGS`` idempotently when not already set.
-    Call this at the top of multi-worker batch entrypoints (ideally before JAX initializes
-    its CPU backend) to prevent ``N_workers * N_cores`` thread oversubscription.
+    This module uses only the Python standard library at import time, so calling
+    ``from k2sc import configure_single_thread_env; configure_single_thread_env()``
+    at the top of a worker entrypoint sets BLAS/OpenMP thread limits *before*
+    ``numpy``, ``scipy``, or ``jax`` initialize their native C/C++ runtime pools.
+    Explicit caller environment overrides are preserved via ``os.environ.setdefault``,
+    and ``--xla_cpu_multi_thread_eigen=false`` is appended to ``XLA_FLAGS`` idempotently.
     """
     for var in _SINGLE_THREAD_ENV_VARS:
         os.environ.setdefault(var, "1")
@@ -41,11 +43,12 @@ def configure_single_thread_env() -> None:
         )
 
 
-
 def ensure_float64() -> None:
-    """Enable 64-bit floating-point precision in JAX."""
-    if not jax.config.jax_enable_x64:
-        jax.config.update("jax_enable_x64", True)
+    """Enable 64-bit floating-point precision in JAX without eagerly importing JAX."""
+    os.environ.setdefault("JAX_ENABLE_X64", "True")
+    jax_mod = sys.modules.get("jax")
+    if jax_mod is not None and not jax_mod.config.jax_enable_x64:
+        jax_mod.config.update("jax_enable_x64", True)
 
 
 ensure_float64()
@@ -53,6 +56,10 @@ ensure_float64()
 
 def as_f64(x) -> jax.Array:
     """Convert input to a float64 JAX array, enforcing jax_enable_x64=True."""
+    import jax
+    import jax.numpy as jnp
+
+    ensure_float64()
     if not jax.config.jax_enable_x64:
         jax.config.update("jax_enable_x64", True)
     with warnings.catch_warnings():

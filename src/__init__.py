@@ -1,13 +1,20 @@
 """K2SC: Kepler/K2 and TESS light curve systematics correction with JAX Gaussian Processes."""
 
-from ._jax_env import ensure_float64
+from ._jax_env import configure_single_thread_env, ensure_float64
 
 ensure_float64()
 
 name = "K2SC"
 __version__ = "2.0.0"
 
-__all__ = ["K2SCCorrector", "K2SCResult", "__version__", "detrend", "name"]
+__all__ = [
+    "K2SCCorrector",
+    "K2SCResult",
+    "__version__",
+    "configure_single_thread_env",
+    "detrend",
+    "name",
+]
 
 
 def __getattr__(attr: str):

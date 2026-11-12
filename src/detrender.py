@@ -80,7 +80,9 @@ class Detrender:
         self._precomp_tr: PrecomputedPairwise | None = precompute_pairwise_jax(
             self._X_tr_jax, self._splits_pad_tr
         )
-        self._precomp_splits_ref = self.gp.splits
+        self._precomp_splits_key: tuple[float, ...] | None = tuple(
+            np.asarray(self._splits_pad_tr, dtype=np.float64).tolist()
+        )
 
         self.tr_pv: np.ndarray | None = None
         self.opt_result: OptimizationResult | None = None
@@ -94,13 +96,16 @@ class Detrender:
         return self.data.masked_time
 
     def _training_precomp(self) -> PrecomputedPairwise:
-        splits_now = self.gp.splits
-        if self._precomp_tr is None or splits_now is not self._precomp_splits_ref:
-            self._splits_pad_tr = pad_splits(splits_now)
+        splits_pad_now = pad_splits(self.gp.splits)
+        if isinstance(splits_pad_now, jax.core.Tracer):
+            return precompute_pairwise_jax(self._X_tr_jax, splits_pad_now)
+        splits_key = tuple(np.asarray(splits_pad_now, dtype=np.float64).tolist())
+        if self._precomp_tr is None or splits_key != self._precomp_splits_key:
+            self._splits_pad_tr = splits_pad_now
             self._precomp_tr = precompute_pairwise_jax(
                 self._X_tr_jax, self._splits_pad_tr
             )
-            self._precomp_splits_ref = splits_now
+            self._precomp_splits_key = splits_key
         return self._precomp_tr
 
     def _objective_tensors(self, training: bool = True):

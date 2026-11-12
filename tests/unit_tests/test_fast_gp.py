@@ -1,8 +1,12 @@
-"""Unit tests for vectorized tinygp kernels, analytic GP gradients, and two-stage L-BFGS-B."""
+"""Unit tests for vectorized tinygp kernels, analytic GP gradients, and static-chunk screening."""
 
 from __future__ import annotations
 
+import functools
 import os
+import subprocess
+import sys
+from pathlib import Path
 
 import jax
 import jax.numpy as jnp
@@ -10,7 +14,7 @@ import numpy as np
 import numpy.testing as npt
 import pytest
 import tinygp
-from k2sc._jax_env import configure_single_thread_env
+from k2sc import configure_single_thread_env
 from k2sc.detrender import Detrender
 from k2sc.gp import (
     PrecomputedPairwise,
@@ -25,6 +29,7 @@ from k2sc.kernels import (
     KERNEL_PERIODIC,
     KERNEL_QUASIPERIODIC,
     KERNEL_QUASIPERIODIC_EP,
+    BasicKernel,
     K2SCKernel,
     K2SCSpatialKernel,
     K2SCTimeKernel,
@@ -36,11 +41,20 @@ from k2sc.kernels import (
 )
 from k2sc.optimizers import (
     MultiStartLBFGSBOptimizer,
+    _eval_candidates_chunked,
+    _finite_box_bounds,
+    _generate_candidates,
+    _jit_map_neglnposterior_precomputed,
+    _jit_neglnposterior_precomputed,
     _jit_val_and_grad,
     _jit_val_and_grad_precomputed,
+    _jit_vmap_neglnposterior_precomputed,
+    _make_scipy_host_callback,
+    _neglnposterior_impl,
+    _select_diverse_top_k,
     compute_closed_lims,
-    polish_lbfgsb,
 )
+from scipy.optimize import minimize
 from tinygp.kernels import Exp, ExpSineSquared, ExpSquared
 from tinygp.transforms import Subspace
 
@@ -365,59 +379,216 @@ def test_jit_val_and_grad_posterior_priors_and_oob_safety(
         assert np.isposinf(float(v_bad))
         npt.assert_array_equal(np.asarray(g_bad), np.zeros(k_inst.npar))
 
-    # Reassigning dt.gp.splits invalidates cached _precomp_tr automatically
+    # In-place list mutations on dt.gp.splits (.append, item assignment, .clear)
+    # and reassignment to None must invalidate cached _precomp_tr automatically.
+    dt.gp.splits = [2326.0]
+    val_one_split = dt.neglnposterior(np.asarray(pv), training=True)
+    dt.gp.splits.append(2354.0)
+    val_two_splits = dt.neglnposterior(np.asarray(pv), training=True)
+    expected_two_splits = -(
+        float(dt.kernel.ln_prior(pv))
+        + dt.gp.lnlikelihood(
+            np.asarray(pv), dt.tr_data.masked_normalised_flux, dt.tr_data.masked_inputs
+        )
+    )
+    assert not np.isclose(val_one_split, val_two_splits, rtol=0.0, atol=1e-9)
+    npt.assert_allclose(val_two_splits, expected_two_splits, rtol=1e-12, atol=1e-12)
+
+    dt.gp.splits.clear()
+    val_cleared = dt.neglnposterior(np.asarray(pv), training=True)
     dt.gp.splits = None
     val_unsplit = dt.neglnposterior(np.asarray(pv), training=True)
     expected_unsplit = -(
         float(dt.kernel.ln_prior(pv))
-        + dt.gp.lnlikelihood(np.asarray(pv), dt.tr_data.masked_normalised_flux, dt.tr_data.masked_inputs)
+        + dt.gp.lnlikelihood(
+            np.asarray(pv), dt.tr_data.masked_normalised_flux, dt.tr_data.masked_inputs
+        )
     )
+    npt.assert_allclose(val_cleared, expected_unsplit, rtol=1e-12, atol=1e-12)
     npt.assert_allclose(val_unsplit, expected_unsplit, rtol=1e-12, atol=1e-12)
 
 
-def test_singular_cholesky_precomputed_returns_neginf_and_zero_grad():
-    """Singular rank-1 covariance must return (-inf, zeros) without NaN propagation."""
+def test_singular_cholesky_and_overflowing_grad_rejected_cleanly():
+    """Singular covariance or overflowing analytic gradients must be rejected as infeasible."""
     X_dup = np.zeros((16, 3), dtype=np.float64)
     X_dup[:, 0] = 2300.0
     y_dup = np.linspace(-1e-3, 1e-3, 16, dtype=np.float64)
-    precomp = precompute_pairwise_jax(jnp.asarray(X_dup), pad_splits(None))
+    precomp_dup = precompute_pairwise_jax(jnp.asarray(X_dup), pad_splits(None))
     pv_sing = jnp.array([1.0, 0.25, 0.0, 21.0, 21.0, -9.0], dtype=jnp.float64)
 
-    lp = eval_gp_lnlike_precomputed_jax(pv_sing, precomp, jnp.asarray(y_dup), KERNEL_BASIC)
+    lp = eval_gp_lnlike_precomputed_jax(
+        pv_sing, precomp_dup, jnp.asarray(y_dup), KERNEL_BASIC
+    )
     lp2, grad2 = eval_gp_lnlike_and_grad_precomputed_jax(
-        pv_sing, precomp, jnp.asarray(y_dup), KERNEL_BASIC
+        pv_sing, precomp_dup, jnp.asarray(y_dup), KERNEL_BASIC
     )
     assert float(lp) == -np.inf
     assert float(lp2) == -np.inf
     npt.assert_array_equal(np.asarray(grad2), np.zeros(6))
 
+    # Construct a well-conditioned covariance where forward triangular solve z stays
+    # within float64 (lp finite) while back-substitution alpha / outer(alpha, alpha)
+    # overflows float64 (||z||^2 < 1.8e308, while alpha_0^2 > 1.8e308 -> inf!).
+    t_grid = np.linspace(2300.0, 2315.0, 16, dtype=np.float64)
+    X_well = np.column_stack([t_grid, np.linspace(-0.2, 0.2, 16), np.linspace(0.2, -0.2, 16)])
+    y_huge = np.zeros(16, dtype=np.float64)
+    y_huge[0] = 1.0e150
 
-def test_multistart_two_stage_lbfgsb_map_convergence_and_reduced_nfev(
-    canonical_gp_dataset,
-):
-    """Two-stage MultiStartLBFGSBOptimizer must recover the exact MAP basin with fewer nfev."""
+    k_basic = BasicKernel()
+    s_pad = pad_splits(None)
+    X_well_jax = jnp.asarray(X_well, dtype=jnp.float64)
+    y_huge_jax = jnp.asarray(y_huge, dtype=jnp.float64)
+    precomp_well = precompute_pairwise_jax(X_well_jax, s_pad)
+    pv_small_noise = jnp.array([-5.5, 0.5, -5.5, 20.0, 20.0, -5.0], dtype=jnp.float64)
+
+    # Confirm forward log-likelihood alone is finite, proving this exercises the grad-overflow guard
+    lp_only = float(
+        eval_gp_lnlike_precomputed_jax(pv_small_noise, precomp_well, y_huge_jax, KERNEL_BASIC)
+    )
+    assert np.isfinite(lp_only)
+
+    lp_vg, grad_vg = eval_gp_lnlike_and_grad_precomputed_jax(
+        pv_small_noise, precomp_well, y_huge_jax, KERNEL_BASIC
+    )
+    assert float(lp_vg) == -np.inf
+    npt.assert_array_equal(np.asarray(grad_vg), np.zeros(6))
+
+    lims_low = jnp.asarray(k_basic.lims[0], dtype=jnp.float64)
+    lims_high = jnp.asarray(k_basic.lims[1], dtype=jnp.float64)
+    nll_vg, nll_grad = _jit_val_and_grad_precomputed(
+        pv_small_noise,
+        precomp_well,
+        y_huge_jax,
+        lims_low,
+        lims_high,
+        k_basic.prior_spec,
+        KERNEL_BASIC,
+    )
+    assert np.isposinf(float(nll_vg))
+    npt.assert_array_equal(np.asarray(nll_grad), np.zeros(6))
+
+    host_cb, _ = _make_scipy_host_callback(
+        X_well_jax,
+        y_huge_jax,
+        s_pad,
+        lims_low,
+        lims_high,
+        k_basic.prior_spec,
+        KERNEL_BASIC,
+        precomp=precomp_well,
+    )
+    val_host, grad_host = host_cb(np.asarray(pv_small_noise))
+    assert val_host == 1e30
+    npt.assert_array_equal(grad_host, np.zeros(6))
+
+
+def test_eval_candidates_chunked_static_shapes_and_vmap_map_parity(canonical_gp_dataset):
+    """Verify exact parity across scalar, static-chunk lax.map, and vmap batch evaluators."""
+    X_tr = jnp.asarray(canonical_gp_dataset["X_tr"], dtype=jnp.float64)
+    y_tr = jnp.asarray(canonical_gp_dataset["y_tr"], dtype=jnp.float64)
+    s_pad = pad_splits(canonical_gp_dataset["splits"])
+    precomp = precompute_pairwise_jax(X_tr, s_pad)
+
+    kernel = QuasiPeriodicKernel(period=7.3)
+    lims_low = jnp.asarray(kernel.lims[0], dtype=jnp.float64)
+    lims_high = jnp.asarray(kernel.lims[1], dtype=jnp.float64)
+    closed_lims = compute_closed_lims(kernel.lims)
+    rng = np.random.default_rng(1234)
+    cands_19 = _generate_candidates(
+        kernel, closed_lims, rng, n_candidates=19, y_var=float(np.var(canonical_gp_dataset["y_tr"]))
+    )
+    # Inject an out-of-bounds row to verify +inf parity across vmap, lax.map, and chunked slicing
+    cands_19[7, 0] = -99.0
+
+    for n_sub in (1, 5, 19):
+        sub = cands_19[:n_sub]
+        sub_jax = jnp.asarray(sub, dtype=jnp.float64)
+        vals_chunked = _eval_candidates_chunked(
+            sub,
+            X_tr,
+            y_tr,
+            s_pad,
+            lims_low,
+            lims_high,
+            kernel.prior_spec,
+            kernel.kernel_id,
+            chunk_size=8,
+            precomp=precomp,
+        )
+        vals_vmap = np.asarray(
+            _jit_vmap_neglnposterior_precomputed(
+                sub_jax,
+                precomp,
+                y_tr,
+                lims_low,
+                lims_high,
+                kernel.prior_spec,
+                kernel.kernel_id,
+            ),
+            dtype=np.float64,
+        )
+        vals_map = np.asarray(
+            _jit_map_neglnposterior_precomputed(
+                sub_jax,
+                precomp,
+                y_tr,
+                lims_low,
+                lims_high,
+                kernel.prior_spec,
+                kernel.kernel_id,
+            ),
+            dtype=np.float64,
+        )
+        assert vals_chunked.shape == (n_sub,)
+        npt.assert_allclose(vals_chunked, vals_vmap, rtol=1e-12, atol=1e-12)
+        npt.assert_allclose(vals_chunked, vals_map, rtol=1e-12, atol=1e-12)
+
+    val_scalar = float(
+        _jit_neglnposterior_precomputed(
+            jnp.asarray(cands_19[0], dtype=jnp.float64),
+            precomp,
+            y_tr,
+            lims_low,
+            lims_high,
+            kernel.prior_spec,
+            kernel.kernel_id,
+        )
+    )
+    npt.assert_allclose(
+        _eval_candidates_chunked(
+            cands_19[:1],
+            X_tr,
+            y_tr,
+            s_pad,
+            lims_low,
+            lims_high,
+            kernel.prior_spec,
+            kernel.kernel_id,
+            chunk_size=8,
+            precomp=precomp,
+        )[0],
+        val_scalar,
+        rtol=1e-13,
+        atol=1e-13,
+    )
+
+
+def test_multistart_lbfgsb_harmonic_trap_map_parity(canonical_gp_dataset):
+    """Seeded at 2*P_true (14.6 d), default MultiStartLBFGSBOptimizer must recover P_true=7.3 d."""
     X_tr = canonical_gp_dataset["X_tr"]
     y_tr = canonical_gp_dataset["y_tr"]
     splits = canonical_gp_dataset["splits"]
 
-    kernel = QuasiPeriodicKernel(period=7.3)
-    opt = MultiStartLBFGSBOptimizer(
-        n_candidates=128, top_k=5, maxiter=200, ftol=1e-15, gtol=1e-6
-    )
-    res_two_stage = opt.optimize(X_tr, y_tr, splits, kernel, seed=2026)
+    # Initialize on the 2 * P_true (14.6 d) harmonic trap under default tolerances (ftol=1e-9, gtol=1e-6)
+    kernel = QuasiPeriodicKernel(period=14.6)
+    opt = MultiStartLBFGSBOptimizer(n_candidates=128, top_k=5)
+    res_fast = opt.optimize(X_tr, y_tr, splits, kernel, seed=2026)
 
-    assert res_two_stage.success
-    assert np.isfinite(res_two_stage.fun)
-    assert res_two_stage.grad_norm < 1e-3
-    assert abs(float(res_two_stage.pv[2]) - 7.3) / 7.3 < 0.05
+    assert res_fast.success
+    assert np.isfinite(res_fast.fun)
+    assert abs(float(res_fast.pv[2]) - 7.3) / 7.3 < 0.05
 
-    # Compare against exhaustive full 200-iter single-stage polish on the exact same 5 seeds
-    from k2sc.optimizers import (
-        _eval_candidates_chunked,
-        _generate_candidates,
-        _select_diverse_top_k,
-    )
-
+    # Reference uncached tinygp reverse-mode AD L-BFGS-B polish from the exact same 5 diverse seeds
     rng = np.random.default_rng(2026)
     X_jax = jnp.asarray(X_tr, dtype=jnp.float64)
     y_jax = jnp.asarray(y_tr, dtype=jnp.float64)
@@ -426,6 +597,7 @@ def test_multistart_two_stage_lbfgsb_map_convergence_and_reduced_nfev(
     lims_low = jnp.asarray(kernel.lims[0], dtype=jnp.float64)
     lims_high = jnp.asarray(kernel.lims[1], dtype=jnp.float64)
     closed_lims = compute_closed_lims(kernel.lims)
+    c_low, c_high = _finite_box_bounds(closed_lims, kernel)
     cands = _generate_candidates(
         kernel,
         closed_lims,
@@ -445,43 +617,65 @@ def test_multistart_two_stage_lbfgsb_map_convergence_and_reduced_nfev(
         precomp=precomp,
     )
     k_bounds = np.asarray(kernel.bounds, dtype=np.float64)
+    norm_low = np.where(np.isfinite(k_bounds[:, 0]), k_bounds[:, 0], c_low)
+    norm_high = np.where(np.isfinite(k_bounds[:, 1]), k_bounds[:, 1], c_high)
     seeds = _select_diverse_top_k(
         cands,
         energies,
-        k_bounds[:, 0],
-        k_bounds[:, 1],
+        norm_low,
+        norm_high,
         top_k=5,
         min_dist=0.15,
         is_periodic=True,
     )
 
-    single_stage_nfev = int(cands.shape[0])
-    best_single_fun = float("inf")
+    ref_vg_jit = functools.partial(jax.jit, static_argnames=("kernel_id",))(
+        jax.value_and_grad(_neglnposterior_impl)
+    )
+    c_arr = np.asarray(closed_lims, dtype=np.float64)
+    uncached_nfev = int(cands.shape[0])
+    best_ref_fun = float("inf")
     for x_seed in seeds:
-        pol = polish_lbfgsb(
-            x_seed,
-            X_jax,
-            y_jax,
-            s_pad,
-            lims_low,
-            lims_high,
-            kernel.prior_spec,
-            kernel.kernel_id,
-            closed_lims,
-            ftol=1e-15,
-            gtol=1e-6,
-            maxiter=200,
-            precomp=precomp,
+        x0_clip = np.clip(np.asarray(x_seed, dtype=np.float64), c_arr[:, 0], c_arr[:, 1])
+
+        def _ref_cb(x_vec: np.ndarray) -> tuple[float, np.ndarray]:
+            nonlocal uncached_nfev
+            uncached_nfev += 1
+            vj, gj = ref_vg_jit(
+                jnp.asarray(x_vec, dtype=jnp.float64),
+                X_jax,
+                y_jax,
+                s_pad,
+                lims_low,
+                lims_high,
+                kernel.prior_spec,
+                kernel.kernel_id,
+            )
+            vf = float(vj)
+            gf = np.asarray(gj, dtype=np.float64)
+            if not np.isfinite(vf) or not np.all(np.isfinite(gf)):
+                return 1e30, np.zeros_like(x_vec, dtype=np.float64)
+            return vf, gf
+
+        init_v, _ = _ref_cb(x0_clip)
+        mres = minimize(
+            _ref_cb,
+            x0_clip,
+            method="L-BFGS-B",
+            jac=True,
+            bounds=closed_lims,
+            options={"ftol": 1e-9, "gtol": 1e-6, "maxiter": 200},
         )
-        single_stage_nfev += pol.nfev
-        best_single_fun = min(best_single_fun, pol.fun)
+        fin_v, _ = _ref_cb(np.clip(np.asarray(mres.x, dtype=np.float64), c_arr[:, 0], c_arr[:, 1]))
+        best_ref_fun = min(best_ref_fun, init_v, fin_v)
 
-    npt.assert_allclose(res_two_stage.fun, best_single_fun, rtol=1e-5, atol=1e-4)
-    assert res_two_stage.nfev < single_stage_nfev
+    # Tight absolute nat parity on the MAP objective + consecutive-point caching saves redundant evals
+    npt.assert_allclose(res_fast.fun, best_ref_fun, rtol=0.0, atol=1e-6)
+    assert res_fast.nfev < uncached_nfev
 
 
-def test_configure_single_thread_env_idempotence(monkeypatch):
-    """Verify configure_single_thread_env sets defaults, preserves overrides, and is idempotent."""
+def test_configure_single_thread_env_idempotence_and_fresh_subprocess(monkeypatch):
+    """Verify stdlib-only import ordering, valid OpenXLA flags, and clean jax.devices() startup."""
     thread_vars = (
         "OMP_NUM_THREADS",
         "OPENBLAS_NUM_THREADS",
@@ -496,8 +690,8 @@ def test_configure_single_thread_env_idempotence(monkeypatch):
     for var in thread_vars:
         assert os.environ[var] == "1"
     xla_first = os.environ["XLA_FLAGS"]
-    assert "--xla_cpu_multi_thread_eigen=false" in xla_first
-    assert "intra_op_parallelism_threads=1" in xla_first
+    assert xla_first == "--xla_cpu_multi_thread_eigen=false"
+    assert "intra_op_parallelism_threads" not in xla_first
 
     # Second call must be strictly idempotent (no duplicate flags)
     configure_single_thread_env()
@@ -509,10 +703,48 @@ def test_configure_single_thread_env_idempotence(monkeypatch):
     configure_single_thread_env()
     assert os.environ["OMP_NUM_THREADS"] == "2"
     assert os.environ["XLA_FLAGS"] == (
-        "--xla_force_host_platform_device_count=1 "
-        "--xla_cpu_multi_thread_eigen=false intra_op_parallelism_threads=1"
+        "--xla_force_host_platform_device_count=1 --xla_cpu_multi_thread_eigen=false"
     )
     configure_single_thread_env()
-    assert (
-        os.environ["XLA_FLAGS"].count("--xla_cpu_multi_thread_eigen") == 1
+    assert os.environ["XLA_FLAGS"].count("--xla_cpu_multi_thread_eigen") == 1
+
+    # Fresh subprocess verification: importing k2sc and calling configure_single_thread_env()
+    # MUST NOT import numpy or jax, and subsequent jax.devices() must parse XLA_FLAGS cleanly.
+    src_dir = Path(__file__).resolve().parents[2] / "src"
+    sub_code = (
+        "import importlib.util, os, sys\n"
+        "from pathlib import Path\n"
+        f"src_dir = Path({str(src_dir)!r})\n"
+        "spec = importlib.util.spec_from_file_location(\n"
+        "    'k2sc', src_dir / '__init__.py', submodule_search_locations=[str(src_dir)]\n"
+        ")\n"
+        "mod = importlib.util.module_from_spec(spec)\n"
+        "sys.modules['k2sc'] = mod\n"
+        "spec.loader.exec_module(mod)\n"
+        "assert 'configure_single_thread_env' in mod.__all__\n"
+        "assert 'numpy' not in sys.modules\n"
+        "assert 'jax' not in sys.modules\n"
+        "from k2sc import configure_single_thread_env\n"
+        "configure_single_thread_env()\n"
+        "assert 'numpy' not in sys.modules\n"
+        "assert 'jax' not in sys.modules\n"
+        "assert os.environ['OMP_NUM_THREADS'] == '1'\n"
+        "assert os.environ['XLA_FLAGS'] == '--xla_cpu_multi_thread_eigen=false'\n"
+        "import jax\n"
+        "assert len(jax.devices()) >= 1\n"
+        "import jax.numpy as jnp\n"
+        "assert jnp.zeros(1).dtype == jnp.float64\n"
     )
+    sub_env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in (*thread_vars, "XLA_FLAGS", "JAX_ENABLE_X64")
+    }
+    proc = subprocess.run(
+        [sys.executable, "-c", sub_code],
+        env=sub_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, f"Subprocess failed:\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"

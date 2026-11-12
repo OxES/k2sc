@@ -155,8 +155,8 @@ def _val_and_grad_precomputed_impl(
     raw_nll = -(ln_p + ln_l)
     clip_active = (pv_eval >= low_arr + 1e-12) & (pv_eval <= high_arr - 1e-12)
     raw_grad = jnp.where(clip_active, -(grad_ln_p + grad_ln_l), 0.0)
-    val = jnp.where(in_bounds & jnp.isfinite(raw_nll), raw_nll, jnp.inf)
-    ok = jnp.isfinite(val) & jnp.all(jnp.isfinite(raw_grad))
+    ok = in_bounds & jnp.isfinite(raw_nll) & jnp.all(jnp.isfinite(raw_grad))
+    val = jnp.where(ok, raw_nll, jnp.inf)
     safe_grad = jnp.where(ok, raw_grad, jnp.zeros_like(raw_grad))
     return val, safe_grad
 
@@ -295,7 +295,7 @@ def _eval_candidates_chunked(
     chunk_size: int = _VMAP_CHUNK_SIZE,
     precomp: PrecomputedPairwise | None = None,
 ) -> np.ndarray:
-    """Evaluate (M, npar) candidate parameter vectors in static-shape jax.vmap chunks."""
+    """Evaluate (M, npar) candidate parameter vectors in static-shape chunks (lax.map on CPU, vmap on GPU/TPU)."""
     cand_arr = np.asarray(candidates, dtype=np.float64)
     n_total, _ = cand_arr.shape
     if n_total == 0:
@@ -306,12 +306,9 @@ def _eval_candidates_chunked(
         if precomp is None
         else precomp
     )
-    if jax.default_backend() == "cpu":
-        # On CPU, lax.map keeps each (N, N) covariance matrix inside L2 cache
-        # (~3.9 MB at N=700) and calls single-matrix LAPACK dpotrf directly,
-        # avoiding ~250 MB batched vmap intermediates that thrash DRAM bandwidth.
-        vals = _jit_map_neglnposterior_precomputed(
-            as_f64(cand_arr),
+    if n_total == 1:
+        val_single = _jit_neglnposterior_precomputed(
+            as_f64(cand_arr[0]),
             pc,
             y_fit_jax,
             lims_low_jax,
@@ -319,17 +316,26 @@ def _eval_candidates_chunked(
             prior_spec,
             kernel_id,
         )
-        return np.asarray(vals, dtype=np.float64)
+        return np.array([float(val_single)], dtype=np.float64)
 
+    chunk = max(1, int(chunk_size))
+    # On CPU, lax.map keeps each (N, N) covariance matrix inside L2 cache
+    # (~3.9 MB at N=700) and calls single-matrix LAPACK dpotrf directly,
+    # while static chunk shapes compile at most once per kernel_id.
+    batch_fn = (
+        _jit_map_neglnposterior_precomputed
+        if jax.default_backend() == "cpu"
+        else _jit_vmap_neglnposterior_precomputed
+    )
     out = np.empty(n_total, dtype=np.float64)
-    for start in range(0, n_total, chunk_size):
-        end = min(start + chunk_size, n_total)
+    for start in range(0, n_total, chunk):
+        end = min(start + chunk, n_total)
         batch = cand_arr[start:end]
         rem = end - start
-        if rem < chunk_size:
-            pad_rows = np.repeat(cand_arr[:1], chunk_size - rem, axis=0)
+        if rem < chunk:
+            pad_rows = np.repeat(batch[:1], chunk - rem, axis=0)
             batch = np.concatenate([batch, pad_rows], axis=0)
-        vals = _jit_vmap_neglnposterior_precomputed(
+        vals = batch_fn(
             as_f64(batch),
             pc,
             y_fit_jax,
@@ -782,7 +788,7 @@ def _box_projected_grad_norm(
 
 
 class MultiStartLBFGSBOptimizer:
-    """Sobol + harmonic-stratified jax.vmap screening with two-stage L-BFGS-B polishing."""
+    """Sobol + harmonic-stratified candidate screening with multi-start L-BFGS-B polishing."""
 
     name = "multistart"
 
@@ -868,88 +874,26 @@ class MultiStartLBFGSBOptimizer:
         )
 
         best_res: OptimizationResult | None = None
-        if seeds.shape[0] > 1 and self.maxiter > 40:
-            stage1_maxiter = min(35, self.maxiter)
-            stage1_ftol = max(1e-6, self.ftol)
-            stage1_gtol = max(1e-4, self.gtol)
-            stage1_results: list[OptimizationResult] = []
-            for x_seed in seeds:
-                pol1 = polish_lbfgsb(
-                    x_seed,
-                    X_jax,
-                    y_jax,
-                    splits_pad,
-                    lims_low_jax,
-                    lims_high_jax,
-                    kernel.prior_spec,
-                    kernel.kernel_id,
-                    closed_lims,
-                    ftol=stage1_ftol,
-                    gtol=stage1_gtol,
-                    maxiter=stage1_maxiter,
-                    precomp=precomp,
-                )
-                total_nfev += pol1.nfev
-                total_njev += pol1.njev
-                stage1_results.append(pol1)
-
-            stage1_results.sort(key=lambda r: (not np.isfinite(r.fun), float(r.fun)))
-            best_s1 = stage1_results[0]
-            best_res = best_s1
-
-            span = np.maximum(norm_high - norm_low, 1e-6)
-            stage2_seeds = [best_s1.pv]
-            if np.isfinite(best_s1.fun):
-                for runner in stage1_results[1:]:
-                    if not np.isfinite(runner.fun):
-                        continue
-                    norm_dist = float(np.linalg.norm((runner.pv - best_s1.pv) / span))
-                    if norm_dist > 0.05:
-                        if (runner.fun - best_s1.fun) <= 2.0:
-                            stage2_seeds.append(runner.pv)
-                        break
-
-            for x_s2 in stage2_seeds:
-                pol2 = polish_lbfgsb(
-                    x_s2,
-                    X_jax,
-                    y_jax,
-                    splits_pad,
-                    lims_low_jax,
-                    lims_high_jax,
-                    kernel.prior_spec,
-                    kernel.kernel_id,
-                    closed_lims,
-                    ftol=self.ftol,
-                    gtol=self.gtol,
-                    maxiter=self.maxiter,
-                    precomp=precomp,
-                )
-                total_nfev += pol2.nfev
-                total_njev += pol2.njev
-                if best_res is None or pol2.fun <= best_res.fun:
-                    best_res = pol2
-        else:
-            for x_seed in seeds:
-                pol = polish_lbfgsb(
-                    x_seed,
-                    X_jax,
-                    y_jax,
-                    splits_pad,
-                    lims_low_jax,
-                    lims_high_jax,
-                    kernel.prior_spec,
-                    kernel.kernel_id,
-                    closed_lims,
-                    ftol=self.ftol,
-                    gtol=self.gtol,
-                    maxiter=self.maxiter,
-                    precomp=precomp,
-                )
-                total_nfev += pol.nfev
-                total_njev += pol.njev
-                if best_res is None or pol.fun < best_res.fun:
-                    best_res = pol
+        for x_seed in seeds:
+            pol = polish_lbfgsb(
+                x_seed,
+                X_jax,
+                y_jax,
+                splits_pad,
+                lims_low_jax,
+                lims_high_jax,
+                kernel.prior_spec,
+                kernel.kernel_id,
+                closed_lims,
+                ftol=self.ftol,
+                gtol=self.gtol,
+                maxiter=self.maxiter,
+                precomp=precomp,
+            )
+            total_nfev += pol.nfev
+            total_njev += pol.njev
+            if best_res is None or pol.fun < best_res.fun:
+                best_res = pol
 
         assert best_res is not None
         return OptimizationResult(
