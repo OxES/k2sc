@@ -49,11 +49,16 @@ from k2sc.optimizers import (
     _jit_val_and_grad,
     _jit_val_and_grad_precomputed,
     _jit_vmap_neglnposterior_precomputed,
+    _lnlike_precomputed_optx,
     _make_scipy_host_callback,
     _neglnposterior_impl,
+    _pv_to_unconstrained_np,
+    _sanitize_pv_bounds,
     _select_diverse_top_k,
+    _unconstrained_to_pv_jax,
     compute_closed_lims,
 )
+from k2sc.priors import eval_ln_prior_jax
 from scipy.optimize import minimize
 from tinygp.kernels import Exp, ExpSineSquared, ExpSquared
 from tinygp.transforms import Subspace
@@ -322,7 +327,7 @@ def test_analytic_lnlike_and_grad_precomputed_vs_reference_autodiff_and_fd(
 
 @pytest.mark.parametrize("kname", list(kernels.keys()))
 def test_jit_val_and_grad_posterior_priors_and_oob_safety(
-    canonical_gp_dataset, kname: str
+    canonical_gp_dataset, kname: str, monkeypatch
 ):
     """Verify full _jit_val_and_grad (with Uniform/Normal/LogNorm priors) vs jax.value_and_grad."""
     X = canonical_gp_dataset["X"]
@@ -342,8 +347,28 @@ def test_jit_val_and_grad_posterior_priors_and_oob_safety(
         tr_bspan=16,
         seed=17,
     )
+    # PrecomputedPairwise cache must be lazy so prediction-only Detrender passes skip O(N^2) allocs
+    assert dt._precomp_tr is None
+    assert dt._precomp_splits_key is None
     X_tr, y_tr, s_pad, lims_low, lims_high = dt._objective_tensors(training=True)
     precomp = dt._training_precomp()
+    assert dt._precomp_tr is precomp
+
+    if kname == "basic":
+        import k2sc.optimizers as opt_mod
+
+        recompute_calls = {"n": 0}
+        orig_precomp = opt_mod.precompute_pairwise_jax
+
+        def _counted_precomp(*args, **kwargs):
+            recompute_calls["n"] += 1
+            return orig_precomp(*args, **kwargs)
+
+        with monkeypatch.context() as mp:
+            mp.setattr(opt_mod, "precompute_pairwise_jax", _counted_precomp)
+            dt.optimize(optimizer="multistart", n_candidates=8, top_k=1, maxiter=2, seed=0)
+        assert recompute_calls["n"] == 0
+        assert dt._precomp_tr is precomp
 
     pv = jnp.asarray(_nontrivial_pv(kname), dtype=jnp.float64)
     val_fast, grad_fast = _jit_val_and_grad(
@@ -482,8 +507,8 @@ def test_singular_cholesky_and_overflowing_grad_rejected_cleanly():
     npt.assert_array_equal(grad_host, np.zeros(6))
 
 
-def test_eval_candidates_chunked_static_shapes_and_vmap_map_parity(canonical_gp_dataset):
-    """Verify exact parity across scalar, static-chunk lax.map, and vmap batch evaluators."""
+def test_optx_custom_vjp_batch_parity_and_infeasible_grad_safety(canonical_gp_dataset):
+    """Verify @jax.custom_vjp _lnlike_precomputed_optx under vmap on interior & infeasible batches."""
     X_tr = jnp.asarray(canonical_gp_dataset["X_tr"], dtype=jnp.float64)
     y_tr = jnp.asarray(canonical_gp_dataset["y_tr"], dtype=jnp.float64)
     s_pad = pad_splits(canonical_gp_dataset["splits"])
@@ -493,12 +518,167 @@ def test_eval_candidates_chunked_static_shapes_and_vmap_map_parity(canonical_gp_
     lims_low = jnp.asarray(kernel.lims[0], dtype=jnp.float64)
     lims_high = jnp.asarray(kernel.lims[1], dtype=jnp.float64)
     closed_lims = compute_closed_lims(kernel.lims)
+    c_arr = np.asarray(closed_lims, dtype=np.float64)
+    c_low = jnp.asarray(c_arr[:, 0], dtype=jnp.float64)
+    c_high = jnp.asarray(c_arr[:, 1], dtype=jnp.float64)
+
+    def _make_loss_z_pair(
+        kid: int,
+        l_low: jax.Array,
+        l_high: jax.Array,
+        cl_low: jax.Array,
+        cl_high: jax.Array,
+        prior_spec,
+    ):
+        def _loss_z_optx(z: jax.Array, precomp_arg: PrecomputedPairwise, y_arg: jax.Array):
+            pv = _unconstrained_to_pv_jax(z, cl_low, cl_high)
+            in_bounds, _, safe_pv, _, _ = _sanitize_pv_bounds(pv, l_low, l_high)
+            ln_p = eval_ln_prior_jax(safe_pv, prior_spec)
+            ln_l = _lnlike_precomputed_optx(safe_pv, precomp_arg, y_arg, kid)
+            raw_nll = -(ln_p + ln_l)
+            val = jnp.where(in_bounds & jnp.isfinite(raw_nll), raw_nll, jnp.inf)
+            both_fin = jnp.isfinite(cl_low) & jnp.isfinite(cl_high)
+            z_excess = jnp.where(both_fin, jnp.maximum(0.0, jnp.abs(z) - 14.0), 0.0)
+            wall = 1e-8 * jnp.sum(jnp.square(z_excess))
+            return jnp.where(jnp.isfinite(val), val + wall, jnp.asarray(1e30, dtype=jnp.float64))
+
+        def _loss_z_ref(z: jax.Array, X_arg: jax.Array, s_arg: jax.Array, y_arg: jax.Array):
+            pv = _unconstrained_to_pv_jax(z, cl_low, cl_high)
+            val = _neglnposterior_impl(pv, X_arg, y_arg, s_arg, l_low, l_high, prior_spec, kid)
+            both_fin = jnp.isfinite(cl_low) & jnp.isfinite(cl_high)
+            z_excess = jnp.where(both_fin, jnp.maximum(0.0, jnp.abs(z) - 14.0), 0.0)
+            wall = 1e-8 * jnp.sum(jnp.square(z_excess))
+            return jnp.where(jnp.isfinite(val), val + wall, jnp.asarray(1e30, dtype=jnp.float64))
+
+        return _loss_z_optx, _loss_z_ref
+
+    loss_qp_optx, loss_qp_ref = _make_loss_z_pair(
+        kernel.kernel_id, lims_low, lims_high, c_low, c_high, kernel.prior_spec
+    )
+    batch_vg_optx = jax.jit(jax.vmap(jax.value_and_grad(loss_qp_optx), in_axes=(0, None, None)))
+    batch_vg_ref = jax.jit(
+        jax.vmap(jax.value_and_grad(loss_qp_ref), in_axes=(0, None, None, None))
+    )
+
+    rng = np.random.default_rng(77)
+    base_pv = _nontrivial_pv("quasiperiodic")
+    rel_step = rng.uniform(-0.1, 0.1, size=(8, base_pv.size))
+    cands_8 = np.clip(
+        base_pv[None, :] * (1.0 + rel_step),
+        c_arr[:, 0] + 1e-3,
+        c_arr[:, 1] - 1e-3,
+    )
+    z_np = _pv_to_unconstrained_np(cands_8, c_arr[:, 0], c_arr[:, 1])
+    # Exercise both |z| <= 14 interior rows and the |z| > 14 quadratic saturation wall
+    z_np[-1, 0] = 15.5
+    z_batch = jnp.asarray(z_np, dtype=jnp.float64)
+
+    vals_optx, grads_optx = batch_vg_optx(z_batch, precomp, y_tr)
+    vals_ref, grads_ref = batch_vg_ref(z_batch, X_tr, s_pad, y_tr)
+    npt.assert_allclose(np.asarray(vals_optx), np.asarray(vals_ref), rtol=1e-11, atol=1e-11)
+    npt.assert_allclose(np.asarray(grads_optx), np.asarray(grads_ref), rtol=1e-11, atol=1e-11)
+
+    # Infeasible Cholesky-singular and analytic-gradient-overflowing batches must yield (1e30, 0)
+    k_basic = BasicKernel()
+    b_low = jnp.asarray(k_basic.lims[0], dtype=jnp.float64)
+    b_high = jnp.asarray(k_basic.lims[1], dtype=jnp.float64)
+    b_closed = np.asarray(compute_closed_lims(k_basic.lims), dtype=np.float64)
+    bc_low = jnp.asarray(b_closed[:, 0], dtype=jnp.float64)
+    bc_high = jnp.asarray(b_closed[:, 1], dtype=jnp.float64)
+    loss_basic_optx, _ = _make_loss_z_pair(
+        KERNEL_BASIC, b_low, b_high, bc_low, bc_high, k_basic.prior_spec
+    )
+    batch_basic_vg = jax.jit(
+        jax.vmap(jax.value_and_grad(loss_basic_optx), in_axes=(0, None, None))
+    )
+
+    X_dup = np.zeros((16, 3), dtype=np.float64)
+    X_dup[:, 0] = 2300.0
+    y_dup = jnp.asarray(np.linspace(-1e-3, 1e-3, 16, dtype=np.float64))
+    precomp_dup = precompute_pairwise_jax(jnp.asarray(X_dup), pad_splits(None))
+    pv_sing_batch = np.vstack(
+        [
+            np.array([1.0, 0.25, 0.0, 21.0, 21.0, -9.0], dtype=np.float64),
+            np.array([0.5, 0.50, -0.5, 18.0, 18.0, -9.2], dtype=np.float64),
+        ]
+    )
+    direct_lnlike_vg = jax.jit(
+        jax.vmap(
+            jax.value_and_grad(
+                lambda p, pc, y: _lnlike_precomputed_optx(p, pc, y, KERNEL_BASIC)
+            ),
+            in_axes=(0, None, None),
+        )
+    )
+    lp_sing, glp_sing = direct_lnlike_vg(
+        jnp.asarray(pv_sing_batch, dtype=jnp.float64), precomp_dup, y_dup
+    )
+    assert np.all(np.isneginf(np.asarray(lp_sing)))
+    npt.assert_array_equal(np.asarray(glp_sing), np.zeros((2, 6)))
+
+    b_low_sing = b_low.at[5].set(-10.0)
+    b_closed_sing = b_closed.copy()
+    b_closed_sing[5, 0] = -10.0 + 1e-12
+    sing_prior = k_basic.prior_spec._replace(
+        vmin=k_basic.prior_spec.vmin.at[5].set(-10.0)
+    )
+    loss_sing_optx, _ = _make_loss_z_pair(
+        KERNEL_BASIC,
+        b_low_sing,
+        b_high,
+        jnp.asarray(b_closed_sing[:, 0], dtype=jnp.float64),
+        bc_high,
+        sing_prior,
+    )
+    batch_sing_vg = jax.jit(
+        jax.vmap(jax.value_and_grad(loss_sing_optx), in_axes=(0, None, None))
+    )
+    z_sing = _pv_to_unconstrained_np(pv_sing_batch, b_closed_sing[:, 0], b_closed_sing[:, 1])
+    z_sing[1, 0] = 16.0
+    v_sing, g_sing = batch_sing_vg(jnp.asarray(z_sing, dtype=jnp.float64), precomp_dup, y_dup)
+    npt.assert_array_equal(np.asarray(v_sing), np.full(2, 1e30))
+    npt.assert_array_equal(np.asarray(g_sing), np.zeros((2, 6)))
+
+    t_grid = np.linspace(2300.0, 2315.0, 16, dtype=np.float64)
+    X_well = np.column_stack([t_grid, np.linspace(-0.2, 0.2, 16), np.linspace(0.2, -0.2, 16)])
+    y_huge = np.zeros(16, dtype=np.float64)
+    y_huge[0] = 1.0e150
+    precomp_well = precompute_pairwise_jax(jnp.asarray(X_well), pad_splits(None))
+    pv_ovf_batch = np.vstack(
+        [
+            np.array([-5.5, 0.5, -5.5, 20.0, 20.0, -5.0], dtype=np.float64),
+            np.array([-5.0, 0.4, -5.0, 19.0, 19.0, -5.5], dtype=np.float64),
+        ]
+    )
+    z_ovf = _pv_to_unconstrained_np(pv_ovf_batch, b_closed[:, 0], b_closed[:, 1])
+    z_ovf[1, 2] = -16.0
+    v_ovf, g_ovf = batch_basic_vg(
+        jnp.asarray(z_ovf, dtype=jnp.float64), precomp_well, jnp.asarray(y_huge, dtype=jnp.float64)
+    )
+    npt.assert_array_equal(np.asarray(v_ovf), np.full(2, 1e30))
+    npt.assert_array_equal(np.asarray(g_ovf), np.zeros((2, 6)))
+
+
+def test_eval_candidates_chunked_static_shapes_and_vmap_map_parity(canonical_gp_dataset):
+    """Verify exact parity across scalar, static-chunk lax.map, and vmap batch evaluators."""
+    X_tr = jnp.asarray(canonical_gp_dataset["X_tr"], dtype=jnp.float64)
+    y_tr = jnp.asarray(canonical_gp_dataset["y_tr"], dtype=jnp.float64)
+    y_np = np.asarray(canonical_gp_dataset["y_tr"], dtype=np.float64)
+    s_pad = pad_splits(canonical_gp_dataset["splits"])
+    precomp = precompute_pairwise_jax(X_tr, s_pad)
+    X_rel, splits_rel = _shift_time_origin(X_tr, s_pad, X_tr[0, 0])
+
+    kernel = QuasiPeriodicKernel(period=7.3)
+    lims_low = jnp.asarray(kernel.lims[0], dtype=jnp.float64)
+    lims_high = jnp.asarray(kernel.lims[1], dtype=jnp.float64)
+    closed_lims = compute_closed_lims(kernel.lims)
     rng = np.random.default_rng(1234)
     cands_19 = _generate_candidates(
-        kernel, closed_lims, rng, n_candidates=19, y_var=float(np.var(canonical_gp_dataset["y_tr"]))
+        kernel, closed_lims, rng, n_candidates=19, y_var=float(np.var(y_np))
     )
     # Inject an out-of-bounds row to verify +inf parity across vmap, lax.map, and chunked slicing
     cands_19[7, 0] = -99.0
+    is_cpu = jax.default_backend() == "cpu"
 
     for n_sub in (1, 5, 19):
         sub = cands_19[:n_sub]
@@ -540,8 +720,44 @@ def test_eval_candidates_chunked_static_shapes_and_vmap_map_parity(canonical_gp_
             dtype=np.float64,
         )
         assert vals_chunked.shape == (n_sub,)
-        npt.assert_allclose(vals_chunked, vals_vmap, rtol=1e-12, atol=1e-12)
-        npt.assert_allclose(vals_chunked, vals_map, rtol=1e-12, atol=1e-12)
+        # Static-chunk padding/slicing must match the active backend's unpadded XLA kernel to 1e-13
+        vals_same_backend = vals_map if is_cpu else vals_vmap
+        npt.assert_allclose(vals_chunked, vals_same_backend, rtol=1e-13, atol=1e-13)
+        assert np.array_equal(np.isposinf(vals_map), np.isposinf(vals_vmap))
+
+    # Cross-lowering check (sequential LAPACK lax.map vs batched XLA vmap Cholesky):
+    # bound each finite candidate's discrepancy by its empirical condition number cond(K_cand).
+    cands_19_jax = jnp.asarray(cands_19, dtype=jnp.float64)
+    vals_map_19 = np.asarray(
+        _jit_map_neglnposterior_precomputed(
+            cands_19_jax, precomp, y_tr, lims_low, lims_high, kernel.prior_spec, kernel.kernel_id
+        ),
+        dtype=np.float64,
+    )
+    vals_vmap_19 = np.asarray(
+        _jit_vmap_neglnposterior_precomputed(
+            cands_19_jax, precomp, y_tr, lims_low, lims_high, kernel.prior_spec, kernel.kernel_id
+        ),
+        dtype=np.float64,
+    )
+    eps_f64 = float(np.finfo(np.float64).eps)
+    n_pts = int(X_tr.shape[0])
+    eye_n = jnp.eye(n_pts, dtype=jnp.float64)
+    for idx in range(cands_19.shape[0]):
+        if np.isposinf(vals_map_19[idx]):
+            assert np.isposinf(vals_vmap_19[idx])
+            continue
+        row_pv = jnp.asarray(cands_19[idx], dtype=jnp.float64)
+        _, _, diag_cand = build_tinygp_kernels(row_pv, splits_rel, kernel.kernel_id)
+        K_cand = np.asarray(
+            K2SCKernel(row_pv, splits_rel, kernel.kernel_id)(X_rel, X_rel) + diag_cand * eye_n,
+            dtype=np.float64,
+        )
+        cond_k = float(np.linalg.cond(K_cand))
+        quad_fit = float(y_np @ np.linalg.solve(K_cand, y_np))
+        scale = max(float(n_pts), abs(float(vals_map_19[idx])), quad_fit)
+        tol_row = max(1e-12, 32.0 * cond_k * eps_f64 * scale)
+        assert abs(float(vals_map_19[idx]) - float(vals_vmap_19[idx])) <= tol_row
 
     val_scalar = float(
         _jit_neglnposterior_precomputed(
@@ -633,14 +849,13 @@ def test_multistart_lbfgsb_harmonic_trap_map_parity(canonical_gp_dataset):
         jax.value_and_grad(_neglnposterior_impl)
     )
     c_arr = np.asarray(closed_lims, dtype=np.float64)
-    uncached_nfev = int(cands.shape[0])
     best_ref_fun = float("inf")
+    uncached_same_grad_nfev = int(cands.shape[0])
+    best_same_grad_fun = float("inf")
     for x_seed in seeds:
         x0_clip = np.clip(np.asarray(x_seed, dtype=np.float64), c_arr[:, 0], c_arr[:, 1])
 
         def _ref_cb(x_vec: np.ndarray) -> tuple[float, np.ndarray]:
-            nonlocal uncached_nfev
-            uncached_nfev += 1
             vj, gj = ref_vg_jit(
                 jnp.asarray(x_vec, dtype=jnp.float64),
                 X_jax,
@@ -669,13 +884,48 @@ def test_multistart_lbfgsb_harmonic_trap_map_parity(canonical_gp_dataset):
         fin_v, _ = _ref_cb(np.clip(np.asarray(mres.x, dtype=np.float64), c_arr[:, 0], c_arr[:, 1]))
         best_ref_fun = min(best_ref_fun, init_v, fin_v)
 
-    # Tight absolute nat parity on the MAP objective + consecutive-point caching saves redundant evals
+        # Deterministic deduplication check: uncached callback using the *identical*
+        # analytic _jit_val_and_grad_precomputed follows the exact same L-BFGS-B iterates,
+        # so consecutive-point caching saves >= 1 boundary call per seed (at x0_clip).
+        def _same_grad_uncached_cb(x_vec: np.ndarray) -> tuple[float, np.ndarray]:
+            nonlocal uncached_same_grad_nfev
+            uncached_same_grad_nfev += 1
+            vj, gj = _jit_val_and_grad_precomputed(
+                jnp.asarray(x_vec, dtype=jnp.float64),
+                precomp,
+                y_jax,
+                lims_low,
+                lims_high,
+                kernel.prior_spec,
+                kernel.kernel_id,
+            )
+            vf = float(vj)
+            gf = np.asarray(gj, dtype=np.float64)
+            if not np.isfinite(vf) or not np.all(np.isfinite(gf)):
+                return 1e30, np.zeros_like(x_vec, dtype=np.float64)
+            return vf, gf
+
+        init_sg, _ = _same_grad_uncached_cb(x0_clip)
+        mres_sg = minimize(
+            _same_grad_uncached_cb,
+            x0_clip,
+            method="L-BFGS-B",
+            jac=True,
+            bounds=closed_lims,
+            options={"ftol": 1e-9, "gtol": 1e-6, "maxiter": 200},
+        )
+        fin_sg, _ = _same_grad_uncached_cb(
+            np.clip(np.asarray(mres_sg.x, dtype=np.float64), c_arr[:, 0], c_arr[:, 1])
+        )
+        best_same_grad_fun = min(best_same_grad_fun, init_sg, fin_sg)
+
     npt.assert_allclose(res_fast.fun, best_ref_fun, rtol=0.0, atol=1e-6)
-    assert res_fast.nfev < uncached_nfev
+    npt.assert_allclose(res_fast.fun, best_same_grad_fun, rtol=0.0, atol=1e-12)
+    assert res_fast.nfev <= uncached_same_grad_nfev - len(seeds)
 
 
 def test_configure_single_thread_env_idempotence_and_fresh_subprocess(monkeypatch):
-    """Verify stdlib-only import ordering, valid OpenXLA flags, and clean jax.devices() startup."""
+    """Verify stdlib-only import ordering, valid OpenXLA flags, and JAX_ENABLE_X64=0 override."""
     thread_vars = (
         "OMP_NUM_THREADS",
         "OPENBLAS_NUM_THREADS",
@@ -708,12 +958,14 @@ def test_configure_single_thread_env_idempotence_and_fresh_subprocess(monkeypatc
     configure_single_thread_env()
     assert os.environ["XLA_FLAGS"].count("--xla_cpu_multi_thread_eigen") == 1
 
-    # Fresh subprocess verification: importing k2sc and calling configure_single_thread_env()
-    # MUST NOT import numpy or jax, and subsequent jax.devices() must parse XLA_FLAGS cleanly.
+    # Fresh subprocess verification with JAX_ENABLE_X64=0 pre-set in os.environ:
+    # importing k2sc MUST override JAX_ENABLE_X64 to 'True' without importing numpy or jax,
+    # and subsequent jax.devices() + jnp.zeros(1) must initialize in 64-bit mode cleanly.
     src_dir = Path(__file__).resolve().parents[2] / "src"
     sub_code = (
         "import importlib.util, os, sys\n"
         "from pathlib import Path\n"
+        "assert os.environ.get('JAX_ENABLE_X64') == '0'\n"
         f"src_dir = Path({str(src_dir)!r})\n"
         "spec = importlib.util.spec_from_file_location(\n"
         "    'k2sc', src_dir / '__init__.py', submodule_search_locations=[str(src_dir)]\n"
@@ -722,6 +974,7 @@ def test_configure_single_thread_env_idempotence_and_fresh_subprocess(monkeypatc
         "sys.modules['k2sc'] = mod\n"
         "spec.loader.exec_module(mod)\n"
         "assert 'configure_single_thread_env' in mod.__all__\n"
+        "assert os.environ['JAX_ENABLE_X64'] == 'True'\n"
         "assert 'numpy' not in sys.modules\n"
         "assert 'jax' not in sys.modules\n"
         "from k2sc import configure_single_thread_env\n"
@@ -731,6 +984,7 @@ def test_configure_single_thread_env_idempotence_and_fresh_subprocess(monkeypatc
         "assert os.environ['OMP_NUM_THREADS'] == '1'\n"
         "assert os.environ['XLA_FLAGS'] == '--xla_cpu_multi_thread_eigen=false'\n"
         "import jax\n"
+        "assert jax.config.jax_enable_x64 is True\n"
         "assert len(jax.devices()) >= 1\n"
         "import jax.numpy as jnp\n"
         "assert jnp.zeros(1).dtype == jnp.float64\n"
@@ -738,8 +992,9 @@ def test_configure_single_thread_env_idempotence_and_fresh_subprocess(monkeypatc
     sub_env = {
         k: v
         for k, v in os.environ.items()
-        if k not in (*thread_vars, "XLA_FLAGS", "JAX_ENABLE_X64")
+        if k not in (*thread_vars, "XLA_FLAGS")
     }
+    sub_env["JAX_ENABLE_X64"] = "0"
     proc = subprocess.run(
         [sys.executable, "-c", sub_code],
         env=sub_env,

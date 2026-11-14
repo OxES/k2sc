@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import time
 
 import jax
@@ -77,12 +78,8 @@ class Detrender:
         self._lims_low_jax = as_f64(self.kernel.lims[0])
         self._lims_high_jax = as_f64(self.kernel.lims[1])
         self._splits_pad_tr = pad_splits(self.gp.splits)
-        self._precomp_tr: PrecomputedPairwise | None = precompute_pairwise_jax(
-            self._X_tr_jax, self._splits_pad_tr
-        )
-        self._precomp_splits_key: tuple[float, ...] | None = tuple(
-            np.asarray(self._splits_pad_tr, dtype=np.float64).tolist()
-        )
+        self._precomp_tr: PrecomputedPairwise | None = None
+        self._precomp_splits_key: tuple[float, ...] | None = None
 
         self.tr_pv: np.ndarray | None = None
         self.opt_result: OptimizationResult | None = None
@@ -283,13 +280,15 @@ class Detrender:
         """Global + exact-gradient local hyperparameter optimization."""
         opt = get_optimizer(optimizer, **kwargs)
         ds = self.tr_data if training else self.data
+        opt_call_kwargs: dict[str, object] = {"pv0": pv0, "seed": seed}
+        if training and "precomp" in inspect.signature(opt.optimize).parameters:
+            opt_call_kwargs["precomp"] = self._training_precomp()
         res = opt.optimize(
             ds.masked_inputs,
             ds.masked_normalised_flux,
             self.gp.splits,
             self.kernel,
-            pv0=pv0,
-            seed=seed,
+            **opt_call_kwargs,
         )
         self.opt_result = res
         self.tr_pv = res.pv.copy()

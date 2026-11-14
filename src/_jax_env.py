@@ -45,7 +45,7 @@ def configure_single_thread_env() -> None:
 
 def ensure_float64() -> None:
     """Enable 64-bit floating-point precision in JAX without eagerly importing JAX."""
-    os.environ.setdefault("JAX_ENABLE_X64", "True")
+    os.environ["JAX_ENABLE_X64"] = "True"
     jax_mod = sys.modules.get("jax")
     if jax_mod is not None and not jax_mod.config.jax_enable_x64:
         jax_mod.config.update("jax_enable_x64", True)

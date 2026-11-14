@@ -820,13 +820,18 @@ class MultiStartLBFGSBOptimizer:
         kernel: DtKernel,
         pv0=None,
         seed: int | np.random.Generator | None = 0,
+        precomp: PrecomputedPairwise | None = None,
     ) -> OptimizationResult:
         t0 = time.perf_counter()
         rng = np.random.default_rng(seed)
         X_jax = as_f64(X_fit)
         y_jax = as_f64(y_fit)
         splits_pad = pad_splits(splits)
-        precomp = precompute_pairwise_jax(X_jax, splits_pad)
+        precomp = (
+            precompute_pairwise_jax(X_jax, splits_pad)
+            if precomp is None
+            else precomp
+        )
         lims_low_jax = as_f64(kernel.lims[0])
         lims_high_jax = as_f64(kernel.lims[1])
         closed_lims = compute_closed_lims(kernel.lims)
@@ -950,13 +955,18 @@ class VectorizedDEOptimizer:
         kernel: DtKernel,
         pv0=None,
         seed: int | np.random.Generator | None = 0,
+        precomp: PrecomputedPairwise | None = None,
     ) -> OptimizationResult:
         t0 = time.perf_counter()
         rng = np.random.default_rng(seed)
         X_jax = as_f64(X_fit)
         y_jax = as_f64(y_fit)
         splits_pad = pad_splits(splits)
-        precomp = precompute_pairwise_jax(X_jax, splits_pad)
+        precomp = (
+            precompute_pairwise_jax(X_jax, splits_pad)
+            if precomp is None
+            else precomp
+        )
         lims_low_jax = as_f64(kernel.lims[0])
         lims_high_jax = as_f64(kernel.lims[1])
         closed_lims = compute_closed_lims(kernel.lims)
@@ -1311,13 +1321,18 @@ class OptimistixOptimizer:
         kernel: DtKernel,
         pv0=None,
         seed: int | np.random.Generator | None = 0,
+        precomp: PrecomputedPairwise | None = None,
     ) -> OptimizationResult:
         t0 = time.perf_counter()
         rng = np.random.default_rng(seed)
         X_jax = as_f64(X_fit)
         y_jax = as_f64(y_fit)
         splits_pad = pad_splits(splits)
-        precomp = precompute_pairwise_jax(X_jax, splits_pad)
+        precomp = (
+            precompute_pairwise_jax(X_jax, splits_pad)
+            if precomp is None
+            else precomp
+        )
         lims_low_jax = as_f64(kernel.lims[0])
         lims_high_jax = as_f64(kernel.lims[1])
         closed_lims = compute_closed_lims(kernel.lims)
