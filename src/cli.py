@@ -176,6 +176,13 @@ def build_k2sc_parser() -> ArgumentParser:
         default="SqrExp",
     )
     ap.add_argument(
+        "--no-roll-pca",
+        dest="roll_pca",
+        action="store_false",
+        default=True,
+        help="Disable PCA spacecraft-roll rotation and robust 4-MAD axis normalization",
+    )
+    ap.add_argument(
         "--kernel",
         choices=list(kernels.keys()),
         default=None,
@@ -293,6 +300,7 @@ def _detrend_and_write_dataset(
             quiet=args.quiet,
             seed=args.seed,
             default_position_kernel=args.default_position_kernel,
+            roll_pca=args.roll_pca,
             kernel=args.kernel,
             kernel_period=args.kernel_period,
             p_mask_center=args.p_mask_center,
