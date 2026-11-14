@@ -5,7 +5,7 @@
 [![MNRAS](https://img.shields.io/badge/MNRAS-10.1093%2Fmnras%2Fstw706-blue.svg)](https://doi.org/10.1093/mnras/stw706)
 [![arXiv](https://img.shields.io/badge/arXiv-1603.09167-blue.svg?style=flat)](https://arxiv.org/abs/1603.09167)
 
-`k2sc` (**v2.0.0**) is a Python package for space-photometry systematics correction and astrophysical detrending of *Kepler*/K2 and TESS light curves using additive Gaussian Processes (GPs). Originally developed by Aigrain, Parviainen & Pope (2016), `k2sc` v2.0 replaces the legacy C++ `george` backend and serial Differential Evolution solver with a pure-Python [`jax`](https://github.com/jax-ml/jax) + [`tinygp`](https://github.com/dfm/tinygp) + [`equinox`](https://github.com/patrick-kidger/equinox) engine, exact reverse-mode automatic differentiation, and native [`lightkurve`](https://github.com/lightkurve/lightkurve) v2+ integration—achieving **~1–3 s per star on CPU (~100× speedup)**.
+`k2sc` (**v2.0.0**) is a Python package for space-photometry systematics correction and astrophysical detrending of *Kepler*/K2 and TESS light curves using additive Gaussian Processes (GPs). Originally developed by Aigrain, Parviainen & Pope (2016), `k2sc` v2.0 replaces the legacy C++ `george` backend and serial Differential Evolution solver with a pure-Python [`jax`](https://github.com/jax-ml/jax) + [`tinygp`](https://github.com/dfm/tinygp) + [`equinox`](https://github.com/patrick-kidger/equinox) engine, vectorized covariance kernels with exact analytic Cholesky sensitivity gradients, and native [`lightkurve`](https://github.com/lightkurve/lightkurve) v2+ integration—achieving **~1–3 s per star on CPU (~100× speedup)**.
 
 ---
 
@@ -156,8 +156,8 @@ All entry points (`K2SCCorrector.correct`, `k2sc.detrend`, `Detrender.optimize`,
 
 | Backend | Option | Algorithm & Characteristics |
 |---|---|---|
-| **`MultiStartLBFGSBOptimizer`** *(default)* | `"auto"` or `"multistart"` | Deterministic $M = 256$ design (`pv0` + scrambled Sobol quasi-random points + prior/harmonic-stratified draws at $\{P_{\mathrm{LS}}, \tfrac{1}{2}P_{\mathrm{LS}}, 2P_{\mathrm{LS}}\}$), screened in batched `jax.vmap` chunks and polished from the top $K = 5$ diverse basins via bounded SciPy `L-BFGS-B` using exact `jax.value_and_grad` derivatives (~0.8–2.5 s/star on CPU). |
-| **`VectorizedDEOptimizer`** | `"de"` | Vectorized SciPy Differential Evolution (`vectorized=True`, `updating="deferred"`) evaluating entire generations in a single `jax.vmap` call (`--de-npop`, `--de-niter`, `--de-max-time`, early stopping when $\mathrm{ptp}(\text{energies}) < 3.0$), followed by top-3 exact-gradient `L-BFGS-B` polish. |
+| **`MultiStartLBFGSBOptimizer`** *(default)* | `"auto"` or `"multistart"` | Deterministic $M = 256$ design (`pv0` + scrambled Sobol quasi-random points + prior/harmonic-stratified draws at $\{P_{\mathrm{LS}}, \tfrac{1}{2}P_{\mathrm{LS}}, 2P_{\mathrm{LS}}\}$), screened in static-shape chunks (`jax.lax.map` on CPU, `jax.vmap` on GPU/TPU) over precomputed coordinate/split tensors and polished across the top $K = 5$ diverse basins via bounded SciPy `L-BFGS-B` using exact analytic Cholesky sensitivity gradients (~0.8–2.5 s/star on CPU). |
+| **`VectorizedDEOptimizer`** | `"de"` | Vectorized SciPy Differential Evolution (`vectorized=True`, `updating="deferred"`) evaluating entire generations in static-shape `jax.lax.map` / `jax.vmap` chunks (`--de-npop`, `--de-niter`, `--de-max-time`, early stopping when $\mathrm{ptp}(\text{energies}) < 3.0$), followed by top-3 exact-gradient `L-BFGS-B` polish. |
 | **`OptimistixOptimizer`** | `"optimistix"` | Pure-JAX `optimistix.BFGS` (`jax.vmap`-batched across top-$K$ diverse seeds) over smooth logit/sigmoid unconstrained coordinates without Jacobian mode-shift bias (requires `pip install "k2sc[optimistix]"`). |
 
 ---

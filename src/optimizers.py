@@ -15,7 +15,13 @@ from scipy.optimize import OptimizeResult, differential_evolution, minimize
 from scipy.stats import qmc, truncnorm
 
 from ._jax_env import as_f64, ensure_float64
-from .gp import eval_gp_lnlike_jax
+from .gp import (
+    PrecomputedPairwise,
+    _eval_gp_lnlike_and_grad_precomputed_raw,
+    _eval_gp_lnlike_precomputed_raw,
+    eval_gp_lnlike_jax,
+    precompute_pairwise_jax,
+)
 from .kernels import (
     KERNEL_PERIODIC,
     KERNEL_QUASIPERIODIC,
@@ -57,21 +63,18 @@ class OptimizationResult:
     message: str
 
 
-def _neglnposterior_impl(
+def _sanitize_pv_bounds(
     pv: jax.Array,
-    X_fit: jax.Array,
-    y_fit: jax.Array,
-    splits_padded: jax.Array,
     lims_low: jax.Array,
     lims_high: jax.Array,
-    prior_spec: PriorSpec,
-    kernel_id: int,
-) -> jax.Array:
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
     pv_arr = as_f64(pv)
     low_arr = as_f64(lims_low)
     high_arr = as_f64(lims_high)
 
-    in_bounds = jnp.all(jnp.isfinite(pv_arr) & (pv_arr > low_arr) & (pv_arr <= high_arr))
+    in_bounds = jnp.all(
+        jnp.isfinite(pv_arr) & (pv_arr > low_arr) & (pv_arr <= high_arr)
+    )
 
     # Well-conditioned interior fallback when pv is out-of-bounds or non-finite,
     # avoiding NaN cotangents in the unselected branch of jnp.where under grad/vmap.
@@ -87,6 +90,20 @@ def _neglnposterior_impl(
     )
     pv_eval = jnp.where(in_bounds, pv_arr, fallback)
     safe_pv = jnp.clip(pv_eval, low_arr + 1e-12, high_arr - 1e-12)
+    return in_bounds, pv_eval, safe_pv, low_arr, high_arr
+
+
+def _neglnposterior_impl(
+    pv: jax.Array,
+    X_fit: jax.Array,
+    y_fit: jax.Array,
+    splits_padded: jax.Array,
+    lims_low: jax.Array,
+    lims_high: jax.Array,
+    prior_spec: PriorSpec,
+    kernel_id: int,
+) -> jax.Array:
+    in_bounds, _, safe_pv, _, _ = _sanitize_pv_bounds(pv, lims_low, lims_high)
     ln_p = eval_ln_prior_jax(safe_pv, prior_spec)
     ln_l = eval_gp_lnlike_jax(safe_pv, X_fit, y_fit, splits_padded, kernel_id)
     raw_nll = -(ln_p + ln_l)
@@ -96,6 +113,57 @@ def _neglnposterior_impl(
 _jit_neglnposterior = functools.partial(jax.jit, static_argnames=("kernel_id",))(
     _neglnposterior_impl
 )
+
+
+def _neglnposterior_precomputed_impl(
+    pv: jax.Array,
+    precomp: PrecomputedPairwise,
+    y_fit: jax.Array,
+    lims_low: jax.Array,
+    lims_high: jax.Array,
+    prior_spec: PriorSpec,
+    kernel_id: int,
+) -> jax.Array:
+    in_bounds, _, safe_pv, _, _ = _sanitize_pv_bounds(pv, lims_low, lims_high)
+    ln_p = eval_ln_prior_jax(safe_pv, prior_spec)
+    ln_l = _eval_gp_lnlike_precomputed_raw(safe_pv, precomp, y_fit, kernel_id)
+    raw_nll = -(ln_p + ln_l)
+    return jnp.where(in_bounds & jnp.isfinite(raw_nll), raw_nll, jnp.inf)
+
+
+_jit_neglnposterior_precomputed = functools.partial(
+    jax.jit, static_argnames=("kernel_id",)
+)(_neglnposterior_precomputed_impl)
+
+
+def _val_and_grad_precomputed_impl(
+    pv: jax.Array,
+    precomp: PrecomputedPairwise,
+    y_fit: jax.Array,
+    lims_low: jax.Array,
+    lims_high: jax.Array,
+    prior_spec: PriorSpec,
+    kernel_id: int,
+) -> tuple[jax.Array, jax.Array]:
+    in_bounds, pv_eval, safe_pv, low_arr, high_arr = _sanitize_pv_bounds(
+        pv, lims_low, lims_high
+    )
+    ln_p, grad_ln_p = jax.value_and_grad(eval_ln_prior_jax)(safe_pv, prior_spec)
+    ln_l, grad_ln_l = _eval_gp_lnlike_and_grad_precomputed_raw(
+        safe_pv, precomp, y_fit, kernel_id
+    )
+    raw_nll = -(ln_p + ln_l)
+    clip_active = (pv_eval >= low_arr + 1e-12) & (pv_eval <= high_arr - 1e-12)
+    raw_grad = jnp.where(clip_active, -(grad_ln_p + grad_ln_l), 0.0)
+    ok = in_bounds & jnp.isfinite(raw_nll) & jnp.all(jnp.isfinite(raw_grad))
+    val = jnp.where(ok, raw_nll, jnp.inf)
+    safe_grad = jnp.where(ok, raw_grad, jnp.zeros_like(raw_grad))
+    return val, safe_grad
+
+
+_jit_val_and_grad_precomputed = functools.partial(
+    jax.jit, static_argnames=("kernel_id",)
+)(_val_and_grad_precomputed_impl)
 
 
 @functools.partial(jax.jit, static_argnames=("kernel_id",))
@@ -109,12 +177,10 @@ def _jit_val_and_grad(
     prior_spec: PriorSpec,
     kernel_id: int,
 ) -> tuple[jax.Array, jax.Array]:
-    val, grad = jax.value_and_grad(_neglnposterior_impl)(
-        pv, X_fit, y_fit, splits_padded, lims_low, lims_high, prior_spec, kernel_id
+    precomp = precompute_pairwise_jax(X_fit, splits_padded)
+    return _val_and_grad_precomputed_impl(
+        pv, precomp, y_fit, lims_low, lims_high, prior_spec, kernel_id
     )
-    ok = jnp.isfinite(val) & jnp.all(jnp.isfinite(grad))
-    safe_grad = jnp.where(ok, grad, jnp.zeros_like(grad))
-    return val, safe_grad
 
 
 @functools.partial(jax.jit, static_argnames=("kernel_id",))
@@ -128,10 +194,45 @@ def _jit_vmap_neglnposterior(
     prior_spec: PriorSpec,
     kernel_id: int,
 ) -> jax.Array:
+    precomp = precompute_pairwise_jax(X_fit, splits_padded)
     return jax.vmap(
-        _neglnposterior_impl,
-        in_axes=(0, None, None, None, None, None, None, None),
-    )(pv_batch, X_fit, y_fit, splits_padded, lims_low, lims_high, prior_spec, kernel_id)
+        _neglnposterior_precomputed_impl,
+        in_axes=(0, None, None, None, None, None, None),
+    )(pv_batch, precomp, y_fit, lims_low, lims_high, prior_spec, kernel_id)
+
+
+@functools.partial(jax.jit, static_argnames=("kernel_id",))
+def _jit_vmap_neglnposterior_precomputed(
+    pv_batch: jax.Array,
+    precomp: PrecomputedPairwise,
+    y_fit: jax.Array,
+    lims_low: jax.Array,
+    lims_high: jax.Array,
+    prior_spec: PriorSpec,
+    kernel_id: int,
+) -> jax.Array:
+    return jax.vmap(
+        _neglnposterior_precomputed_impl,
+        in_axes=(0, None, None, None, None, None, None),
+    )(pv_batch, precomp, y_fit, lims_low, lims_high, prior_spec, kernel_id)
+
+
+@functools.partial(jax.jit, static_argnames=("kernel_id",))
+def _jit_map_neglnposterior_precomputed(
+    pv_batch: jax.Array,
+    precomp: PrecomputedPairwise,
+    y_fit: jax.Array,
+    lims_low: jax.Array,
+    lims_high: jax.Array,
+    prior_spec: PriorSpec,
+    kernel_id: int,
+) -> jax.Array:
+    return jax.lax.map(
+        lambda pv: _neglnposterior_precomputed_impl(
+            pv, precomp, y_fit, lims_low, lims_high, prior_spec, kernel_id
+        ),
+        pv_batch,
+    )
 
 
 def _parse_lims_arrays(lims) -> tuple[np.ndarray, np.ndarray]:
@@ -192,26 +293,52 @@ def _eval_candidates_chunked(
     prior_spec: PriorSpec,
     kernel_id: int,
     chunk_size: int = _VMAP_CHUNK_SIZE,
+    precomp: PrecomputedPairwise | None = None,
 ) -> np.ndarray:
-    """Evaluate (M, npar) candidate parameter vectors in static-shape jax.vmap chunks."""
+    """Evaluate (M, npar) candidate parameter vectors in static-shape chunks (lax.map on CPU, vmap on GPU/TPU)."""
     cand_arr = np.asarray(candidates, dtype=np.float64)
     n_total, _ = cand_arr.shape
     if n_total == 0:
         return np.empty(0, dtype=np.float64)
 
+    pc = (
+        precompute_pairwise_jax(X_fit_jax, splits_padded)
+        if precomp is None
+        else precomp
+    )
+    if n_total == 1:
+        val_single = _jit_neglnposterior_precomputed(
+            as_f64(cand_arr[0]),
+            pc,
+            y_fit_jax,
+            lims_low_jax,
+            lims_high_jax,
+            prior_spec,
+            kernel_id,
+        )
+        return np.array([float(val_single)], dtype=np.float64)
+
+    chunk = max(1, int(chunk_size))
+    # On CPU, lax.map keeps each (N, N) covariance matrix inside L2 cache
+    # (~3.9 MB at N=700) and calls single-matrix LAPACK dpotrf directly,
+    # while static chunk shapes compile at most once per kernel_id.
+    batch_fn = (
+        _jit_map_neglnposterior_precomputed
+        if jax.default_backend() == "cpu"
+        else _jit_vmap_neglnposterior_precomputed
+    )
     out = np.empty(n_total, dtype=np.float64)
-    for start in range(0, n_total, chunk_size):
-        end = min(start + chunk_size, n_total)
+    for start in range(0, n_total, chunk):
+        end = min(start + chunk, n_total)
         batch = cand_arr[start:end]
         rem = end - start
-        if rem < chunk_size:
-            pad_rows = np.repeat(cand_arr[:1], chunk_size - rem, axis=0)
+        if rem < chunk:
+            pad_rows = np.repeat(batch[:1], chunk - rem, axis=0)
             batch = np.concatenate([batch, pad_rows], axis=0)
-        vals = _jit_vmap_neglnposterior(
+        vals = batch_fn(
             as_f64(batch),
-            X_fit_jax,
+            pc,
             y_fit_jax,
-            splits_padded,
             lims_low_jax,
             lims_high_jax,
             prior_spec,
@@ -527,21 +654,28 @@ def _make_scipy_host_callback(
     lims_high_jax: jax.Array,
     prior_spec: PriorSpec,
     kernel_id: int,
+    precomp: PrecomputedPairwise | None = None,
 ):
     """Build host value-and-gradient callback sanitizing non-finite values to (1e30, 0)."""
+    pc = (
+        precompute_pairwise_jax(X_fit_jax, splits_padded)
+        if precomp is None
+        else precomp
+    )
     counts = {"nfev": 0, "njev": 0}
+    last_eval: dict[str, Any] = {"x": None, "val": float("nan"), "grad": None}
 
-    def _val_and_grad_host(x: np.ndarray) -> tuple[float, np.ndarray]:
+    def _eval_exact(x_arr: np.ndarray) -> tuple[float, np.ndarray]:
+        if last_eval["x"] is not None and np.array_equal(x_arr, last_eval["x"]):
+            return float(last_eval["val"]), last_eval["grad"].copy()
         counts["nfev"] += 1
         counts["njev"] += 1
-        x_arr = np.asarray(x, dtype=np.float64)
         if not np.all(np.isfinite(x_arr)):
-            return 1e30, np.zeros_like(x_arr, dtype=np.float64)
-        val_j, grad_j = _jit_val_and_grad(
+            return float("inf"), np.zeros_like(x_arr, dtype=np.float64)
+        val_j, grad_j = _jit_val_and_grad_precomputed(
             as_f64(x_arr),
-            X_fit_jax,
+            pc,
             y_fit_jax,
-            splits_padded,
             lims_low_jax,
             lims_high_jax,
             prior_spec,
@@ -549,10 +683,19 @@ def _make_scipy_host_callback(
         )
         val = float(val_j)
         grad = np.asarray(grad_j, dtype=np.float64)
+        last_eval["x"] = x_arr.copy()
+        last_eval["val"] = val
+        last_eval["grad"] = grad.copy()
+        return val, grad
+
+    def _val_and_grad_host(x: np.ndarray) -> tuple[float, np.ndarray]:
+        x_arr = np.asarray(x, dtype=np.float64)
+        val, grad = _eval_exact(x_arr)
         if not np.isfinite(val) or not np.all(np.isfinite(grad)):
             return 1e30, np.zeros_like(x_arr, dtype=np.float64)
         return val, grad
 
+    _val_and_grad_host.eval_exact = _eval_exact  # type: ignore[attr-defined]
     return _val_and_grad_host, counts
 
 
@@ -569,12 +712,18 @@ def polish_lbfgsb(
     ftol: float = 1e-9,
     gtol: float = 1e-6,
     maxiter: int = 200,
+    precomp: PrecomputedPairwise | None = None,
 ) -> OptimizationResult:
     """Run bounded exact-gradient SciPy L-BFGS-B polish from a starting point x0."""
     t0 = time.perf_counter()
     c_arr = np.asarray(closed_lims, dtype=np.float64)
     x0_clipped = np.clip(np.asarray(x0, dtype=np.float64), c_arr[:, 0], c_arr[:, 1])
 
+    pc = (
+        precompute_pairwise_jax(X_fit_jax, splits_padded)
+        if precomp is None
+        else precomp
+    )
     host_vg, counts = _make_scipy_host_callback(
         X_fit_jax,
         y_fit_jax,
@@ -583,22 +732,10 @@ def polish_lbfgsb(
         lims_high_jax,
         prior_spec,
         kernel_id,
+        precomp=pc,
     )
 
-    init_val_j, init_grad_j = _jit_val_and_grad(
-        as_f64(x0_clipped),
-        X_fit_jax,
-        y_fit_jax,
-        splits_padded,
-        lims_low_jax,
-        lims_high_jax,
-        prior_spec,
-        kernel_id,
-    )
-    counts["nfev"] += 1
-    counts["njev"] += 1
-    init_val = float(init_val_j)
-    init_grad = np.asarray(init_grad_j, dtype=np.float64)
+    init_val, init_grad = host_vg.eval_exact(x0_clipped)  # type: ignore[attr-defined]
 
     res = minimize(
         host_vg,
@@ -610,20 +747,7 @@ def polish_lbfgsb(
     )
 
     cand_x = np.clip(np.asarray(res.x, dtype=np.float64), c_arr[:, 0], c_arr[:, 1])
-    fin_val_j, fin_grad_j = _jit_val_and_grad(
-        as_f64(cand_x),
-        X_fit_jax,
-        y_fit_jax,
-        splits_padded,
-        lims_low_jax,
-        lims_high_jax,
-        prior_spec,
-        kernel_id,
-    )
-    counts["nfev"] += 1
-    counts["njev"] += 1
-    fin_val = float(fin_val_j)
-    fin_grad = np.asarray(fin_grad_j, dtype=np.float64)
+    fin_val, fin_grad = host_vg.eval_exact(cand_x)  # type: ignore[attr-defined]
 
     if np.isfinite(init_val) and (not np.isfinite(fin_val) or init_val < fin_val):
         best_x = x0_clipped
@@ -664,7 +788,7 @@ def _box_projected_grad_norm(
 
 
 class MultiStartLBFGSBOptimizer:
-    """Sobol + harmonic-stratified jax.vmap screening with top-K L-BFGS-B polishing."""
+    """Sobol + harmonic-stratified candidate screening with multi-start L-BFGS-B polishing."""
 
     name = "multistart"
 
@@ -696,12 +820,18 @@ class MultiStartLBFGSBOptimizer:
         kernel: DtKernel,
         pv0=None,
         seed: int | np.random.Generator | None = 0,
+        precomp: PrecomputedPairwise | None = None,
     ) -> OptimizationResult:
         t0 = time.perf_counter()
         rng = np.random.default_rng(seed)
         X_jax = as_f64(X_fit)
         y_jax = as_f64(y_fit)
         splits_pad = pad_splits(splits)
+        precomp = (
+            precompute_pairwise_jax(X_jax, splits_pad)
+            if precomp is None
+            else precomp
+        )
         lims_low_jax = as_f64(kernel.lims[0])
         lims_high_jax = as_f64(kernel.lims[1])
         closed_lims = compute_closed_lims(kernel.lims)
@@ -730,6 +860,7 @@ class MultiStartLBFGSBOptimizer:
             lims_high_jax,
             kernel.prior_spec,
             kernel.kernel_id,
+            precomp=precomp,
         )
         total_nfev = int(candidates.shape[0])
         total_njev = 0
@@ -762,6 +893,7 @@ class MultiStartLBFGSBOptimizer:
                 ftol=self.ftol,
                 gtol=self.gtol,
                 maxiter=self.maxiter,
+                precomp=precomp,
             )
             total_nfev += pol.nfev
             total_njev += pol.njev
@@ -823,12 +955,18 @@ class VectorizedDEOptimizer:
         kernel: DtKernel,
         pv0=None,
         seed: int | np.random.Generator | None = 0,
+        precomp: PrecomputedPairwise | None = None,
     ) -> OptimizationResult:
         t0 = time.perf_counter()
         rng = np.random.default_rng(seed)
         X_jax = as_f64(X_fit)
         y_jax = as_f64(y_fit)
         splits_pad = pad_splits(splits)
+        precomp = (
+            precompute_pairwise_jax(X_jax, splits_pad)
+            if precomp is None
+            else precomp
+        )
         lims_low_jax = as_f64(kernel.lims[0])
         lims_high_jax = as_f64(kernel.lims[1])
         closed_lims = compute_closed_lims(kernel.lims)
@@ -868,6 +1006,7 @@ class VectorizedDEOptimizer:
                     lims_high_jax,
                     kernel.prior_spec,
                     kernel.kernel_id,
+                    precomp=precomp,
                 )
                 v = float(vals[0])
                 v_clean = v if np.isfinite(v) else 1e30
@@ -886,6 +1025,7 @@ class VectorizedDEOptimizer:
                 lims_high_jax,
                 kernel.prior_spec,
                 kernel.kernel_id,
+                precomp=precomp,
             )
             vals_clean = np.where(np.isfinite(vals), vals, 1e30)
             archive_x.append(pv_batch.copy())
@@ -963,6 +1103,7 @@ class VectorizedDEOptimizer:
                 ftol=self.ftol,
                 gtol=self.gtol,
                 maxiter=self.maxiter_polish,
+                precomp=precomp,
             )
             total_nfev += pol.nfev
             total_njev += pol.njev
@@ -1034,6 +1175,38 @@ def _pv_to_unconstrained_np(
     return z
 
 
+@functools.partial(jax.custom_vjp, nondiff_argnums=(3,))
+def _lnlike_precomputed_optx(
+    pv: jax.Array,
+    precomp: PrecomputedPairwise,
+    y_fit: jax.Array,
+    kernel_id: int,
+) -> jax.Array:
+    return _eval_gp_lnlike_precomputed_raw(pv, precomp, y_fit, kernel_id)
+
+
+def _lnlike_precomputed_optx_fwd(
+    pv: jax.Array,
+    precomp: PrecomputedPairwise,
+    y_fit: jax.Array,
+    kernel_id: int,
+):
+    val, grad_pv = _eval_gp_lnlike_and_grad_precomputed_raw(
+        pv, precomp, y_fit, kernel_id
+    )
+    return val, grad_pv
+
+
+def _lnlike_precomputed_optx_bwd(kernel_id: int, grad_pv: jax.Array, g: jax.Array):
+    del kernel_id
+    return (g * grad_pv, None, None)
+
+
+_lnlike_precomputed_optx.defvjp(
+    _lnlike_precomputed_optx_fwd, _lnlike_precomputed_optx_bwd
+)
+
+
 _OPTX_VMAP_SOLVER_CACHE: dict[tuple[int, int, float, float], Any] = {}
 
 
@@ -1059,11 +1232,13 @@ def _get_optx_batch_solver(
     solver = optx.BestSoFarMinimiser(optx.BFGS(rtol=rtol, atol=atol))
 
     def _loss_z(z: jax.Array, args) -> jax.Array:
-        X_fit, y_fit, splits_pad, lims_low, lims_high, c_low, c_high, prior_spec = args
+        precomp, y_fit, lims_low, lims_high, c_low, c_high, prior_spec = args
         pv = _unconstrained_to_pv_jax(z, c_low, c_high)
-        val = _neglnposterior_impl(
-            pv, X_fit, y_fit, splits_pad, lims_low, lims_high, prior_spec, kernel_id
-        )
+        in_bounds, _, safe_pv, _, _ = _sanitize_pv_bounds(pv, lims_low, lims_high)
+        ln_p = eval_ln_prior_jax(safe_pv, prior_spec)
+        ln_l = _lnlike_precomputed_optx(safe_pv, precomp, y_fit, kernel_id)
+        raw_nll = -(ln_p + ln_l)
+        val = jnp.where(in_bounds & jnp.isfinite(raw_nll), raw_nll, jnp.inf)
         # Arrest unconstrained z runaway beyond |z| > 14 (where sigmoid saturates within
         # <1e-6 of closed_lims) while remaining identically 0 throughout |z| <= 14.
         both_fin = jnp.isfinite(c_low) & jnp.isfinite(c_high)
@@ -1080,7 +1255,7 @@ def _get_optx_batch_solver(
             max_steps=max_steps,
             throw=False,
         )
-        c_low, c_high = args[5], args[6]
+        c_low, c_high = args[4], args[5]
         pv_opt = _unconstrained_to_pv_jax(sol.value, c_low, c_high)
         is_ok = sol.result == optx.RESULTS.successful
         num_steps = sol.stats.get("num_steps", jnp.asarray(0, dtype=jnp.int32))
@@ -1089,16 +1264,15 @@ def _get_optx_batch_solver(
     @jax.jit
     def _solve_batch(
         z0_batch: jax.Array,
-        X_fit: jax.Array,
+        precomp: PrecomputedPairwise,
         y_fit: jax.Array,
-        splits_pad: jax.Array,
         lims_low: jax.Array,
         lims_high: jax.Array,
         c_low: jax.Array,
         c_high: jax.Array,
         prior_spec: PriorSpec,
     ):
-        args = (X_fit, y_fit, splits_pad, lims_low, lims_high, c_low, c_high, prior_spec)
+        args = (precomp, y_fit, lims_low, lims_high, c_low, c_high, prior_spec)
         return jax.vmap(_solve_one, in_axes=(0, None))(z0_batch, args)
 
     _OPTX_VMAP_SOLVER_CACHE[key] = _solve_batch
@@ -1147,12 +1321,18 @@ class OptimistixOptimizer:
         kernel: DtKernel,
         pv0=None,
         seed: int | np.random.Generator | None = 0,
+        precomp: PrecomputedPairwise | None = None,
     ) -> OptimizationResult:
         t0 = time.perf_counter()
         rng = np.random.default_rng(seed)
         X_jax = as_f64(X_fit)
         y_jax = as_f64(y_fit)
         splits_pad = pad_splits(splits)
+        precomp = (
+            precompute_pairwise_jax(X_jax, splits_pad)
+            if precomp is None
+            else precomp
+        )
         lims_low_jax = as_f64(kernel.lims[0])
         lims_high_jax = as_f64(kernel.lims[1])
         closed_lims = compute_closed_lims(kernel.lims)
@@ -1184,6 +1364,7 @@ class OptimistixOptimizer:
             lims_high_jax,
             kernel.prior_spec,
             kernel.kernel_id,
+            precomp=precomp,
         )
 
         k_bounds = np.asarray(kernel.bounds, dtype=np.float64)
@@ -1211,9 +1392,8 @@ class OptimistixOptimizer:
         )
         pv_opts_j, ok_flags_j, num_steps_j = solve_batch(
             as_f64(z0_batch),
-            X_jax,
+            precomp,
             y_jax,
-            splits_pad,
             lims_low_jax,
             lims_high_jax,
             as_f64(c_low_raw),
@@ -1233,11 +1413,10 @@ class OptimistixOptimizer:
         all_check = np.concatenate([pv_opts, seeds[:1]], axis=0)
         all_ok = np.concatenate([ok_flags, np.array([False])], axis=0)
         for cand_pv, cand_ok in zip(all_check, all_ok, strict=True):
-            val_j, grad_j = _jit_val_and_grad(
+            val_j, grad_j = _jit_val_and_grad_precomputed(
                 as_f64(cand_pv),
-                X_jax,
+                precomp,
                 y_jax,
-                splits_pad,
                 lims_low_jax,
                 lims_high_jax,
                 kernel.prior_spec,
@@ -1271,6 +1450,9 @@ class OptimistixOptimizer:
             method=self.name,
             message=msg,
         )
+
+
+OptimistixBFGSOptimizer = OptimistixOptimizer
 
 
 def get_optimizer(name: str | Any = "auto", **kwargs):

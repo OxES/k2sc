@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import time
 
 import jax
@@ -10,12 +11,13 @@ from scipy.optimize import minimize
 
 from ._jax_env import as_f64, ensure_float64
 from .dtdata import DtData
-from .gp import GeorgeGP, SplitGP
+from .gp import GeorgeGP, PrecomputedPairwise, SplitGP, precompute_pairwise_jax
 from .kernels import BasicKernel, DtKernel, pad_splits
 from .optimizers import (
     OptimizationResult,
     _jit_neglnposterior,
-    _jit_val_and_grad,
+    _jit_neglnposterior_precomputed,
+    _jit_val_and_grad_precomputed,
     compute_closed_lims,
     get_optimizer,
     polish_lbfgsb,
@@ -75,6 +77,9 @@ class Detrender:
         self._y_tr_jax = as_f64(self.tr_data.masked_normalised_flux)
         self._lims_low_jax = as_f64(self.kernel.lims[0])
         self._lims_high_jax = as_f64(self.kernel.lims[1])
+        self._splits_pad_tr = pad_splits(self.gp.splits)
+        self._precomp_tr: PrecomputedPairwise | None = None
+        self._precomp_splits_key: tuple[float, ...] | None = None
 
         self.tr_pv: np.ndarray | None = None
         self.opt_result: OptimizationResult | None = None
@@ -87,13 +92,31 @@ class Detrender:
     def time(self) -> np.ndarray:
         return self.data.masked_time
 
+    def _training_precomp(self) -> PrecomputedPairwise:
+        splits_pad_now = pad_splits(self.gp.splits)
+        if isinstance(splits_pad_now, jax.core.Tracer):
+            return precompute_pairwise_jax(self._X_tr_jax, splits_pad_now)
+        splits_key = tuple(np.asarray(splits_pad_now, dtype=np.float64).tolist())
+        if self._precomp_tr is None or splits_key != self._precomp_splits_key:
+            self._splits_pad_tr = splits_pad_now
+            self._precomp_tr = precompute_pairwise_jax(
+                self._X_tr_jax, self._splits_pad_tr
+            )
+            self._precomp_splits_key = splits_key
+        return self._precomp_tr
+
     def _objective_tensors(self, training: bool = True):
         if training:
-            X_jax = self._X_tr_jax
-            y_jax = self._y_tr_jax
-        else:
-            X_jax = as_f64(self.data.masked_inputs)
-            y_jax = as_f64(self.data.masked_normalised_flux)
+            self._training_precomp()
+            return (
+                self._X_tr_jax,
+                self._y_tr_jax,
+                self._splits_pad_tr,
+                self._lims_low_jax,
+                self._lims_high_jax,
+            )
+        X_jax = as_f64(self.data.masked_inputs)
+        y_jax = as_f64(self.data.masked_normalised_flux)
         splits_pad = pad_splits(self.gp.splits)
         return X_jax, y_jax, splits_pad, self._lims_low_jax, self._lims_high_jax
 
@@ -104,8 +127,19 @@ class Detrender:
 
     def neglnposterior_jax(self, pv, training: bool = True) -> jax.Array:
         """Pure-JAX negative log-posterior (autodiff, jit, and vmap safe)."""
+        if training:
+            precomp = self._training_precomp()
+            return _jit_neglnposterior_precomputed(
+                as_f64(pv),
+                precomp,
+                self._y_tr_jax,
+                self._lims_low_jax,
+                self._lims_high_jax,
+                self.kernel.prior_spec,
+                self.kernel.kernel_id,
+            )
         X_jax, y_jax, splits_pad, lims_low, lims_high = self._objective_tensors(
-            training=training
+            training=False
         )
         return _jit_neglnposterior(
             as_f64(pv),
@@ -141,6 +175,7 @@ class Detrender:
         X_jax, y_jax, splits_pad, lims_low, lims_high = self._objective_tensors(
             training=True
         )
+        precomp_tr = self._training_precomp()
         closed_lims = compute_closed_lims(self.kernel.lims)
         c_arr = np.asarray(closed_lims, dtype=np.float64)
         x0_clipped = np.clip(x0, c_arr[:, 0], c_arr[:, 1])
@@ -163,6 +198,7 @@ class Detrender:
                 ftol=ftol,
                 gtol=gtol,
                 maxiter=maxiter,
+                precomp=precomp_tr,
             )
         else:
             t0 = time.perf_counter()
@@ -171,11 +207,10 @@ class Detrender:
             def _scalar_obj(x: np.ndarray) -> float:
                 nfev_counter["n"] += 1
                 v = float(
-                    _jit_neglnposterior(
+                    _jit_neglnposterior_precomputed(
                         as_f64(x),
-                        X_jax,
+                        precomp_tr,
                         y_jax,
-                        splits_pad,
                         lims_low,
                         lims_high,
                         self.kernel.prior_spec,
@@ -195,11 +230,10 @@ class Detrender:
             cand_x = np.clip(
                 np.asarray(mres.x, dtype=np.float64), c_arr[:, 0], c_arr[:, 1]
             )
-            fin_val_j, fin_grad_j = _jit_val_and_grad(
+            fin_val_j, fin_grad_j = _jit_val_and_grad_precomputed(
                 as_f64(cand_x),
-                X_jax,
+                precomp_tr,
                 y_jax,
-                splits_pad,
                 lims_low,
                 lims_high,
                 self.kernel.prior_spec,
@@ -246,13 +280,15 @@ class Detrender:
         """Global + exact-gradient local hyperparameter optimization."""
         opt = get_optimizer(optimizer, **kwargs)
         ds = self.tr_data if training else self.data
+        opt_call_kwargs: dict[str, object] = {"pv0": pv0, "seed": seed}
+        if training and "precomp" in inspect.signature(opt.optimize).parameters:
+            opt_call_kwargs["precomp"] = self._training_precomp()
         res = opt.optimize(
             ds.masked_inputs,
             ds.masked_normalised_flux,
             self.gp.splits,
             self.kernel,
-            pv0=pv0,
-            seed=seed,
+            **opt_call_kwargs,
         )
         self.opt_result = res
         self.tr_pv = res.pv.copy()

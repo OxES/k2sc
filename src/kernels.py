@@ -18,15 +18,14 @@
 
 from __future__ import annotations
 
-from typing import ClassVar
+from typing import Any, ClassVar
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
 import tinygp
-from tinygp.kernels import Exp, ExpSineSquared, ExpSquared
 from tinygp.kernels.distance import Distance
-from tinygp.transforms import Subspace
 
 from ._jax_env import as_f64, ensure_float64
 from .priors import (
@@ -98,14 +97,46 @@ def pad_splits(splits, max_splits: int = MAX_SPLITS) -> jax.Array:
     return jnp.concatenate([arr_sorted, pad], axis=0)
 
 
+_VALID_KERNEL_IDS = (
+    KERNEL_BASIC,
+    KERNEL_BASIC_EP,
+    KERNEL_QUASIPERIODIC,
+    KERNEL_QUASIPERIODIC_EP,
+    KERNEL_PERIODIC,
+)
+_WHITE_NOISE_IDX: dict[int, int] = {
+    KERNEL_BASIC: 5,
+    KERNEL_BASIC_EP: 5,
+    KERNEL_QUASIPERIODIC: 7,
+    KERNEL_QUASIPERIODIC_EP: 7,
+    KERNEL_PERIODIC: 8,
+}
+
+
+def _normalize_kernel_id(kernel_id: int | str) -> int:
+    if isinstance(kernel_id, str):
+        if kernel_id not in KERNEL_IDS:
+            raise ValueError(f"Unknown kernel_id: {kernel_id!r}")
+        return KERNEL_IDS[kernel_id]
+    kid = int(kernel_id)
+    if kid not in _VALID_KERNEL_IDS:
+        raise ValueError(f"Unknown kernel_id: {kernel_id!r}")
+    return kid
+
+
+def _safe_abs(diff: jax.Array) -> jax.Array:
+    """Zero-bias, 1st- and 2nd-order autodiff-safe elementwise |diff|."""
+    is_zero = diff == 0.0
+    safe_diff = jnp.where(is_zero, jnp.ones_like(diff), diff)
+    return jnp.where(is_zero, jnp.zeros_like(diff), jnp.abs(safe_diff))
+
+
 class SafeL1Distance(Distance):
     """Zero-bias, autodiff-safe L1 distance for 0-D scalar and 1-D vector coordinates."""
 
     def distance(self, X1: jax.Array, X2: jax.Array) -> jax.Array:
         diff = jnp.asarray(X1) - jnp.asarray(X2)
-        is_zero = diff == 0.0
-        safe_diff = jnp.where(is_zero, jnp.ones_like(diff), diff)
-        return jnp.sum(jnp.where(is_zero, jnp.zeros_like(diff), jnp.abs(safe_diff)))
+        return jnp.sum(_safe_abs(diff))
 
     def squared_distance(self, X1: jax.Array, X2: jax.Array) -> jax.Array:
         return jnp.square(self.distance(X1, X2))
@@ -123,84 +154,231 @@ class PiecewiseSpatialKernel(tinygp.kernels.Kernel):
         val = self.base_kernel.evaluate(X1, X2)
         return jnp.where(seg1 == seg2, val, jnp.zeros_like(val))
 
+    def evaluate_diag(self, X: jax.Array) -> jax.Array:
+        return self.base_kernel.evaluate_diag(X)
+
+    def __call__(self, X1: jax.Array, X2: jax.Array | None = None) -> jax.Array:
+        if X2 is None:
+            return self.base_kernel(X1)
+        seg1 = jnp.sum(X1[:, 0:1] > self.splits_padded[None, :], axis=-1)
+        seg2 = jnp.sum(X2[:, 0:1] > self.splits_padded[None, :], axis=-1)
+        val = self.base_kernel(X1, X2)
+        return jnp.where(seg1[:, None] == seg2[None, :], val, jnp.zeros_like(val))
+
+
+class _VectorizedSum(tinygp.kernels.Sum):
+    """Sum of two tinygp kernels preserving vectorized 1-D diagonal and 2-D matrix calls."""
+
+    def evaluate_diag(self, X: jax.Array) -> jax.Array:
+        return self.kernel1.evaluate_diag(X) + self.kernel2.evaluate_diag(X)
+
+    def __call__(self, X1: jax.Array, X2: jax.Array | None = None) -> jax.Array:
+        if X2 is None:
+            return self.kernel1(X1) + self.kernel2(X1)
+        return self.kernel1(X1, X2) + self.kernel2(X1, X2)
+
+
+def _eval_time_diag_scalar(p: jax.Array, kernel_id: int) -> jax.Array:
+    if kernel_id == KERNEL_PERIODIC:
+        return (10.0 ** p[0]) + (10.0 ** p[3])
+    return 10.0 ** p[0]
+
+
+def _eval_time_from_diff(p: jax.Array, diff_t: jax.Array, kernel_id: int) -> jax.Array:
+    dt2 = jnp.square(diff_t)
+    if kernel_id in (KERNEL_BASIC, KERNEL_BASIC_EP):
+        return (10.0 ** p[0]) * jnp.exp(-0.5 * p[1] * dt2)
+    dt = _safe_abs(diff_t)
+    s2 = jnp.square(jnp.sin(jnp.pi * dt / p[2]))
+    if kernel_id in (KERNEL_QUASIPERIODIC, KERNEL_QUASIPERIODIC_EP):
+        return (10.0 ** p[0]) * jnp.exp(-s2 / p[1] - 0.5 * p[3] * dt2)
+    if kernel_id == KERNEL_PERIODIC:
+        return (10.0 ** p[0]) * jnp.exp(-s2 / p[1]) + (10.0 ** p[3]) * jnp.exp(
+            -0.5 * p[4] * dt2
+        )
+    raise ValueError(f"Unknown kernel_id: {kernel_id!r}")
+
+
+def _spatial_param_indices(kernel_id: int) -> tuple[int, int, int, bool]:
+    if kernel_id == KERNEL_BASIC:
+        return 2, 3, 4, False
+    if kernel_id == KERNEL_BASIC_EP:
+        return 2, 3, 4, True
+    if kernel_id == KERNEL_QUASIPERIODIC:
+        return 4, 5, 6, False
+    if kernel_id == KERNEL_QUASIPERIODIC_EP:
+        return 4, 5, 6, True
+    if kernel_id == KERNEL_PERIODIC:
+        return 5, 6, 7, False
+    raise ValueError(f"Unknown kernel_id: {kernel_id!r}")
+
+
+def _eval_spatial_diag_scalar(p: jax.Array, kernel_id: int) -> jax.Array:
+    amp_idx, _, _, _ = _spatial_param_indices(kernel_id)
+    return 10.0 ** p[amp_idx]
+
+
+def _eval_spatial_from_diffs(
+    p: jax.Array,
+    diff_x: jax.Array,
+    diff_y: jax.Array,
+    same_seg: jax.Array,
+    kernel_id: int,
+) -> jax.Array:
+    amp_idx, x_idx, y_idx, is_ep = _spatial_param_indices(kernel_id)
+    amp = 10.0 ** p[amp_idx]
+    if is_ep:
+        dx = _safe_abs(diff_x)
+        dy = _safe_abs(diff_y)
+        val = amp * jnp.exp(-jnp.sqrt(p[x_idx]) * dx - jnp.sqrt(p[y_idx]) * dy)
+    else:
+        val = amp * jnp.exp(
+            -0.5 * (p[x_idx] * jnp.square(diff_x) + p[y_idx] * jnp.square(diff_y))
+        )
+    return jnp.where(same_seg, val, jnp.zeros_like(val))
+
+
+class K2SCTimeKernel(tinygp.kernels.Kernel):
+    """Vectorized time-component tinygp kernel for all five K2SC kernel families."""
+
+    pv: jax.Array
+    kernel_id: int = eqx.field(static=True)
+
+    def __init__(self, pv: jax.Array, kernel_id: int | str):
+        self.pv = as_f64(pv)
+        self.kernel_id = _normalize_kernel_id(kernel_id)
+
+    def evaluate(self, X1: jax.Array, X2: jax.Array) -> jax.Array:
+        return _eval_time_from_diff(self.pv, X1[0] - X2[0], self.kernel_id)
+
+    def evaluate_diag(self, X: jax.Array) -> jax.Array:
+        del X
+        return _eval_time_diag_scalar(self.pv, self.kernel_id)
+
+    def __call__(self, X1: jax.Array, X2: jax.Array | None = None) -> jax.Array:
+        if X2 is None:
+            return jnp.broadcast_to(
+                _eval_time_diag_scalar(self.pv, self.kernel_id), (X1.shape[0],)
+            )
+        diff_t = X1[:, 0:1] - X2[None, :, 0]
+        return _eval_time_from_diff(self.pv, diff_t, self.kernel_id)
+
+    def __add__(self, other: tinygp.kernels.Kernel | Any) -> tinygp.kernels.Kernel:
+        if isinstance(other, tinygp.kernels.Kernel):
+            return _VectorizedSum(self, other)
+        return super().__add__(other)
+
+
+class K2SCSpatialKernel(tinygp.kernels.Kernel):
+    """Vectorized piecewise-spatial tinygp kernel with O((N + M) * S) split indexing."""
+
+    pv: jax.Array
+    splits_padded: jax.Array
+    kernel_id: int = eqx.field(static=True)
+
+    def __init__(self, pv: jax.Array, splits_padded: jax.Array, kernel_id: int | str):
+        self.pv = as_f64(pv)
+        self.splits_padded = as_f64(splits_padded)
+        self.kernel_id = _normalize_kernel_id(kernel_id)
+
+    def evaluate(self, X1: jax.Array, X2: jax.Array) -> jax.Array:
+        seg1 = jnp.sum(X1[0] > self.splits_padded)
+        seg2 = jnp.sum(X2[0] > self.splits_padded)
+        return _eval_spatial_from_diffs(
+            self.pv,
+            X1[1] - X2[1],
+            X1[2] - X2[2],
+            seg1 == seg2,
+            self.kernel_id,
+        )
+
+    def evaluate_diag(self, X: jax.Array) -> jax.Array:
+        del X
+        return _eval_spatial_diag_scalar(self.pv, self.kernel_id)
+
+    def __call__(self, X1: jax.Array, X2: jax.Array | None = None) -> jax.Array:
+        if X2 is None:
+            return jnp.broadcast_to(
+                _eval_spatial_diag_scalar(self.pv, self.kernel_id), (X1.shape[0],)
+            )
+        seg1 = jnp.sum(X1[:, 0:1] > self.splits_padded[None, :], axis=-1)
+        seg2 = jnp.sum(X2[:, 0:1] > self.splits_padded[None, :], axis=-1)
+        same_seg = seg1[:, None] == seg2[None, :]
+        diff_x = X1[:, 1:2] - X2[None, :, 1]
+        diff_y = X1[:, 2:3] - X2[None, :, 2]
+        return _eval_spatial_from_diffs(
+            self.pv, diff_x, diff_y, same_seg, self.kernel_id
+        )
+
+    def __add__(self, other: tinygp.kernels.Kernel | Any) -> tinygp.kernels.Kernel:
+        if isinstance(other, tinygp.kernels.Kernel):
+            return _VectorizedSum(self, other)
+        return super().__add__(other)
+
+
+class K2SCKernel(tinygp.kernels.Kernel):
+    """Vectorized fused additive time + piecewise-spatial tinygp kernel for K2SC."""
+
+    pv: jax.Array
+    splits_padded: jax.Array
+    kernel_id: int = eqx.field(static=True)
+
+    def __init__(self, pv: jax.Array, splits_padded: jax.Array, kernel_id: int | str):
+        self.pv = as_f64(pv)
+        self.splits_padded = as_f64(splits_padded)
+        self.kernel_id = _normalize_kernel_id(kernel_id)
+
+    def evaluate(self, X1: jax.Array, X2: jax.Array) -> jax.Array:
+        k1 = _eval_time_from_diff(self.pv, X1[0] - X2[0], self.kernel_id)
+        seg1 = jnp.sum(X1[0] > self.splits_padded)
+        seg2 = jnp.sum(X2[0] > self.splits_padded)
+        k2 = _eval_spatial_from_diffs(
+            self.pv,
+            X1[1] - X2[1],
+            X1[2] - X2[2],
+            seg1 == seg2,
+            self.kernel_id,
+        )
+        return k1 + k2
+
+    def evaluate_diag(self, X: jax.Array) -> jax.Array:
+        del X
+        return _eval_time_diag_scalar(
+            self.pv, self.kernel_id
+        ) + _eval_spatial_diag_scalar(self.pv, self.kernel_id)
+
+    def __call__(self, X1: jax.Array, X2: jax.Array | None = None) -> jax.Array:
+        if X2 is None:
+            diag_val = _eval_time_diag_scalar(
+                self.pv, self.kernel_id
+            ) + _eval_spatial_diag_scalar(self.pv, self.kernel_id)
+            return jnp.broadcast_to(diag_val, (X1.shape[0],))
+        diff_t = X1[:, 0:1] - X2[None, :, 0]
+        k1 = _eval_time_from_diff(self.pv, diff_t, self.kernel_id)
+        seg1 = jnp.sum(X1[:, 0:1] > self.splits_padded[None, :], axis=-1)
+        seg2 = jnp.sum(X2[:, 0:1] > self.splits_padded[None, :], axis=-1)
+        same_seg = seg1[:, None] == seg2[None, :]
+        diff_x = X1[:, 1:2] - X2[None, :, 1]
+        diff_y = X1[:, 2:3] - X2[None, :, 2]
+        k2 = _eval_spatial_from_diffs(
+            self.pv, diff_x, diff_y, same_seg, self.kernel_id
+        )
+        return k1 + k2
+
 
 def build_tinygp_kernels(
     pv: jax.Array,
     splits_padded: jax.Array,
     kernel_id: int | str,
-) -> tuple[tinygp.kernels.Kernel, tinygp.kernels.Kernel, jax.Array]:
-    """Build stateless (k_time, k_pos, diag_variance) tinygp kernels for a hyperparameter vector."""
+) -> tuple[K2SCTimeKernel, K2SCSpatialKernel, jax.Array]:
+    """Build stateless vectorized (k_time, k_pos, diag_variance) tinygp kernels."""
     p = as_f64(pv)
-    kid = KERNEL_IDS[kernel_id] if isinstance(kernel_id, str) else int(kernel_id)
-    safe_l1 = SafeL1Distance()
-
-    if kid == KERNEL_BASIC:
-        k1 = (10.0 ** p[0]) * Subspace(0, ExpSquared(scale=1.0 / jnp.sqrt(p[1])))
-        k2_base = (
-            (10.0 ** p[2])
-            * Subspace(1, ExpSquared(scale=1.0 / jnp.sqrt(p[3])))
-            * Subspace(2, ExpSquared(scale=1.0 / jnp.sqrt(p[4])))
-        )
-        k2 = PiecewiseSpatialKernel(k2_base, splits_padded)
-        diag = 10.0 ** (2.0 * p[5])
-        return k1, k2, diag
-
-    if kid == KERNEL_BASIC_EP:
-        k1 = (10.0 ** p[0]) * Subspace(0, ExpSquared(scale=1.0 / jnp.sqrt(p[1])))
-        k2_base = (
-            (10.0 ** p[2])
-            * Subspace(1, Exp(scale=1.0 / jnp.sqrt(p[3]), distance=safe_l1))
-            * Subspace(2, Exp(scale=1.0 / jnp.sqrt(p[4]), distance=safe_l1))
-        )
-        k2 = PiecewiseSpatialKernel(k2_base, splits_padded)
-        diag = 10.0 ** (2.0 * p[5])
-        return k1, k2, diag
-
-    if kid == KERNEL_QUASIPERIODIC:
-        k1 = (10.0 ** p[0]) * Subspace(
-            0,
-            ExpSineSquared(scale=p[2], gamma=1.0 / p[1], distance=safe_l1)
-            * ExpSquared(scale=1.0 / jnp.sqrt(p[3])),
-        )
-        k2_base = (
-            (10.0 ** p[4])
-            * Subspace(1, ExpSquared(scale=1.0 / jnp.sqrt(p[5])))
-            * Subspace(2, ExpSquared(scale=1.0 / jnp.sqrt(p[6])))
-        )
-        k2 = PiecewiseSpatialKernel(k2_base, splits_padded)
-        diag = 10.0 ** (2.0 * p[7])
-        return k1, k2, diag
-
-    if kid == KERNEL_QUASIPERIODIC_EP:
-        k1 = (10.0 ** p[0]) * Subspace(
-            0,
-            ExpSineSquared(scale=p[2], gamma=1.0 / p[1], distance=safe_l1)
-            * ExpSquared(scale=1.0 / jnp.sqrt(p[3])),
-        )
-        k2_base = (
-            (10.0 ** p[4])
-            * Subspace(1, Exp(scale=1.0 / jnp.sqrt(p[5]), distance=safe_l1))
-            * Subspace(2, Exp(scale=1.0 / jnp.sqrt(p[6]), distance=safe_l1))
-        )
-        k2 = PiecewiseSpatialKernel(k2_base, splits_padded)
-        diag = 10.0 ** (2.0 * p[7])
-        return k1, k2, diag
-
-    if kid == KERNEL_PERIODIC:
-        k1 = (10.0 ** p[0]) * Subspace(
-            0,
-            ExpSineSquared(scale=p[2], gamma=1.0 / p[1], distance=safe_l1),
-        ) + (10.0 ** p[3]) * Subspace(0, ExpSquared(scale=1.0 / jnp.sqrt(p[4])))
-        k2_base = (
-            (10.0 ** p[5])
-            * Subspace(1, ExpSquared(scale=1.0 / jnp.sqrt(p[6])))
-            * Subspace(2, ExpSquared(scale=1.0 / jnp.sqrt(p[7])))
-        )
-        k2 = PiecewiseSpatialKernel(k2_base, splits_padded)
-        diag = 10.0 ** (2.0 * p[8])
-        return k1, k2, diag
-
-    raise ValueError(f"Unknown kernel_id: {kernel_id!r}")
+    s_pad = as_f64(splits_padded)
+    kid = _normalize_kernel_id(kernel_id)
+    k1 = K2SCTimeKernel(p, kid)
+    k2 = K2SCSpatialKernel(p, s_pad, kid)
+    diag = 10.0 ** (2.0 * p[_WHITE_NOISE_IDX[kid]])
+    return k1, k2, diag
 
 
 class DtKernel:

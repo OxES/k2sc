@@ -2,6 +2,14 @@
 
 All notable changes to `k2sc` are documented in this file.
 
+## [Unreleased]
+
+### Performance & Numerical Improvements
+- **Vectorized `tinygp` Kernel Hierarchy (`k2sc.kernels`, `k2sc.gp`):** Added vectorized `tinygp.kernels.Kernel` subclasses (`K2SCTimeKernel`, `K2SCSpatialKernel`, `K2SCKernel`, `_VectorizedSum`, and vectorized `PiecewiseSpatialKernel` / `_BlockMaskedKernel`) that evaluate 1-D `(N,)` diagonals in $\mathcal{O}(N)$ and 2-D `(N, M)` covariance blocks via direct broadcasting and $\mathcal{O}((N + M) S)$ piecewise split segmentation without nested `jax.vmap`.
+- **Precomputed Pairwise Tensors & Analytic GP Sensitivity Gradients (`k2sc.gp`, `k2sc.detrender`, `k2sc.optimizers`):** Added `PrecomputedPairwise` (`precompute_pairwise_jax`), fast forward marginal log-likelihood (`eval_gp_lnlike_precomputed_jax`), and closed-form Cholesky sensitivity gradients (`eval_gp_lnlike_and_grad_precomputed_jax` via $W = \tfrac{1}{2}(\boldsymbol{\alpha}\boldsymbol{\alpha}^\top - K^{-1})$) across all five K2SC kernel families, cached on `Detrender` with value-based split-mutation invalidation and non-finite gradient rejection.
+- **L2-Cache-Resident Static-Chunk CPU Screening & Host Deduplication (`k2sc.optimizers`):** Updated `_eval_candidates_chunked` to dispatch single-point evaluations directly to `_jit_neglnposterior_precomputed` and evaluate multi-candidate batches in static-shape `jax.lax.map` chunks on CPU (`jax.vmap` on GPU/TPU), alongside consecutive-point query deduplication in `_make_scipy_host_callback`.
+- **Single-Thread Worker Environment Helper (`k2sc.configure_single_thread_env`):** Added a stdlib-only `configure_single_thread_env()` helper exported in `k2sc.__all__` that configures BLAS/OpenMP thread environment variables prior to `numpy`/`jax` initialization and appends `--xla_cpu_multi_thread_eigen=false` idempotently to `XLA_FLAGS`.
+
 ## [2.0.0] — 2026-11-11
 
 `k2sc` v2.0.0 is a complete scientific, numerical, and architectural modernization of *K2 Systematics Correction* (Aigrain, Parviainen & Pope 2016, MNRAS, 459, 2408), migrating the Gaussian Process engine from C++ `george` to pure-Python `jax` + `tinygp` + `equinox`, introducing exact-gradient multi-start and vectorized evolutionary optimizers (~100× faster per star on CPU), and adding native Lightkurve v2+ and TESS support.
