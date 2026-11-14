@@ -1031,8 +1031,9 @@ def detrend_k2data(
     else:
         inputs = np.column_stack([ds.time, ds.x, ds.y])
 
-    if ds.data_header is None:
-        ds.data_header = pf.Header()
+    ds.data_header = (
+        ds.data_header.copy() if ds.data_header is not None else pf.Header()
+    )
     ds.data_header["ROLL_PCA"] = (
         bool(roll_pca),
         "Spatial GP fitted in PCA roll coordinates",

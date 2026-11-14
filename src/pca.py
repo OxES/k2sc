@@ -12,6 +12,8 @@ _IQR_HALF_Z: float = float(ndtri(0.75))
 _IDR_HALF_Z: float = float(ndtri(0.90))
 _TRIM_SIGMA = 5.0
 _TRIM_ITERS = 3
+_WEISZFELD_MAX_ITERS = 100
+_WEISZFELD_REL_TOL = 1e-13
 _REL_EPS_GUARD = 64.0
 _SO2_ATOL = 1e-10
 _MIN_PCA_POINTS = 3
@@ -49,6 +51,86 @@ def _robust_trim_sigma(u: np.ndarray, tol: float) -> float:
     q10, q90 = np.percentile(u, [10.0, 90.0])
     sig = float(q90 - q10) / (2.0 * _IDR_HALF_Z)
     return sig if sig > tol else 0.0
+
+
+def _spatial_median_2d(x: np.ndarray, y: np.ndarray) -> tuple[float, float]:
+    """Compute the SO(2)-equivariant 2D L1 spatial median via guarded Newton-Weiszfeld."""
+    mx = float(np.median(x))
+    my = float(np.median(y))
+    eps = float(np.finfo(np.float64).eps)
+    r0 = np.hypot(x - mx, y - my)
+    scale_ref = max(_robust_trim_sigma(r0, 0.0), eps * float(np.hypot(mx, my)))
+    if scale_ref <= 0.0:
+        return mx, my
+
+    tol = _WEISZFELD_REL_TOL * scale_ref
+    n_pts = x.size
+    for _ in range(_WEISZFELD_MAX_ITERS):
+        dx = x - mx
+        dy = y - my
+        dist = np.hypot(dx, dy)
+        pos = dist > tol
+        n_pos = int(pos.sum())
+        if n_pos == 0:
+            break
+        n_zero = n_pts - n_pos
+        inv_d = 1.0 / dist[pos]
+        ux = dx[pos] * inv_d
+        uy = dy[pos] * inv_d
+        rx = float(np.sum(ux))
+        ry = float(np.sum(uy))
+        w_sum = float(np.sum(inv_d))
+
+        if n_zero == 0:
+            new_mx = mx + rx / w_sum
+            new_my = my + ry / w_sum
+
+            # Guarded 2x2 Newton acceleration on smooth L1 objective (quadratic convergence)
+            hxx = float(np.sum((1.0 - ux * ux) * inv_d))
+            hxy = -float(np.sum(ux * uy * inv_d))
+            hyy = float(np.sum((1.0 - uy * uy) * inv_d))
+            det_h = hxx * hyy - hxy * hxy
+            tr_h = hxx + hyy
+            if det_h > 1e-24 * tr_h * tr_h:
+                step_nx = (hyy * rx - hxy * ry) / det_h
+                step_ny = (-hxy * rx + hxx * ry) / det_h
+                if (
+                    np.isfinite(step_nx)
+                    and np.isfinite(step_ny)
+                    and float(np.hypot(step_nx, step_ny)) <= 10.0 * scale_ref
+                ):
+                    nx = mx + step_nx
+                    ny = my + step_ny
+                    ddx = nx - new_mx
+                    ddy = ny - new_my
+                    dd2 = ddx * ddx + ddy * ddy
+                    dw_x = x - new_mx
+                    dw_y = y - new_my
+                    dw = np.hypot(dw_x, dw_y)
+                    dn = np.hypot(x - nx, y - ny)
+                    denom = dn + dw
+                    pos_den = denom > 0.0
+                    delta_f = float(
+                        np.sum(
+                            (dd2 - 2.0 * (ddx * dw_x[pos_den] + ddy * dw_y[pos_den]))
+                            / denom[pos_den]
+                        )
+                    )
+                    if delta_f < 0.0:
+                        new_mx, new_my = nx, ny
+        else:
+            r_norm = float(np.hypot(rx, ry))
+            if r_norm <= float(n_zero):
+                break
+            factor = (1.0 - float(n_zero) / r_norm) / w_sum
+            new_mx = mx + factor * rx
+            new_my = my + factor * ry
+
+        step = float(np.hypot(new_mx - mx, new_my - my))
+        mx, my = new_mx, new_my
+        if step <= tol:
+            break
+    return mx, my
 
 
 @dataclass(frozen=True)
@@ -146,10 +228,10 @@ class RollPCATransform:
 def fit_roll_pca(x, y, clean_mask=None) -> RollPCATransform:
     """Fit a robust SO(2) spacecraft-roll PCA rotation and 4-sigma_MAD axis normalization.
 
-    Uses spherical PCA (SVD of unit-normalized displacements from the coordinate-wise
-    median) to obtain a bounded-leverage initial roll frame immune to both along-roll
-    and oblique cross-roll flyers, followed by iterative 5-sigma trimming in the
-    rotated ``(u1, u2)`` frame before final covariance SVD and scale estimation.
+    Uses the 2D L1 spatial median and spherical PCA (SVD of unit-normalized
+    displacements) to obtain an SO(2)-equivariant, 50%-breakdown initial roll frame,
+    followed by iterative 5-sigma trimming in the rotated ``(u1, u2)`` frame before
+    final covariance SVD, principal-axis median recentring, and 4-MAD scaling.
 
     Parameters
     ----------
@@ -196,28 +278,24 @@ def fit_roll_pca(x, y, clean_mask=None) -> RollPCATransform:
 
     x_clean = x_arr[clean]
     y_clean = y_arr[clean]
-    mu_x = float(np.median(x_clean))
-    mu_y = float(np.median(y_clean))
-    center_xy = np.array([mu_x, mu_y], dtype=np.float64)
+    mu_x, mu_y = _spatial_median_2d(x_clean, y_clean)
 
     eps = float(np.finfo(np.float64).eps)
-    coord_mag_clean = float(
-        max(np.max(np.abs(x_clean)), np.max(np.abs(y_clean)))
-    )
-    rad_tol = _REL_EPS_GUARD * eps * coord_mag_clean
-
     dx_all = x_clean - mu_x
     dy_all = y_clean - mu_y
     radii = np.hypot(dx_all, dy_all)
+    ref_mag = max(float(np.hypot(mu_x, mu_y)), _robust_trim_sigma(radii, 0.0))
+    rad_tol = _REL_EPS_GUARD * eps * ref_mag
+
     nonzero = radii > rad_tol
     if int(nonzero.sum()) < 2:
         return RollPCATransform(
-            center_xy=center_xy,
+            center_xy=np.array([mu_x, mu_y], dtype=np.float64),
             rotation=np.eye(2, dtype=np.float64),
             scales_u=np.ones(2, dtype=np.float64),
         )
 
-    # Bounded-leverage initial frame via spherical PCA (Locantore et al. 1999)
+    # Bounded-leverage SO(2)-equivariant initial frame via spherical PCA (Locantore et al. 1999)
     z_sphere = np.column_stack(
         [dx_all[nonzero] / radii[nonzero], dy_all[nonzero] / radii[nonzero]]
     )
@@ -265,21 +343,23 @@ def fit_roll_pca(x, y, clean_mask=None) -> RollPCATransform:
     _u, _s, vt = np.linalg.svd(c_svd, full_matrices=False)
     rotation = _orient_and_complete_so2(vt[0, :])
 
-    dx_t = x_trim - mu_x
-    dy_t = y_trim - mu_y
-    u_trim = (
-        rotation[0, 0] * dx_t + rotation[0, 1] * dy_t,
-        rotation[1, 0] * dx_t + rotation[1, 1] * dy_t,
-    )
-
-    coord_mag_trim = float(
-        max(np.max(np.abs(x_trim)), np.max(np.abs(y_trim)))
-    )
-    sigma_mad = np.array(
+    # Back-project trimmed principal-axis medians so both normalized axes centre at 0
+    v1_trim = rotation[0, 0] * x_trim + rotation[0, 1] * y_trim
+    v2_trim = rotation[1, 0] * x_trim + rotation[1, 1] * y_trim
+    m1 = float(np.median(v1_trim))
+    m2 = float(np.median(v2_trim))
+    center_xy = np.array(
         [
-            _MAD_TO_SIGMA * float(np.median(np.abs(u_k - float(np.median(u_k)))))
-            for u_k in u_trim
+            rotation[0, 0] * m1 + rotation[1, 0] * m2,
+            rotation[0, 1] * m1 + rotation[1, 1] * m2,
         ],
+        dtype=np.float64,
+    )
+    u_trim = (v1_trim - m1, v2_trim - m2)
+
+    coord_mag_trim = float(np.max(np.hypot(x_trim, y_trim)))
+    sigma_mad = np.array(
+        [_MAD_TO_SIGMA * float(np.median(np.abs(u_k))) for u_k in u_trim],
         dtype=np.float64,
     )
     scale_tol = _REL_EPS_GUARD * eps * max(coord_mag_trim, float(sigma_mad[0]))

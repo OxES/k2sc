@@ -232,6 +232,73 @@ class TestRollPCATransformGeometryAndScaling:
         assert abs(clean_corr) < 0.05
         assert tf.scales_u[1] == pytest.approx(4.0 * 0.003, rel=0.10)
 
+        # 25% (100 / 400) asymmetric oblique outliers at (-1, +1) perpendicular to 45 deg roll:
+        # coordinate-wise median flips z_sphere 90 deg, whereas L1 spatial median stays aligned
+        heavy_idx = np.arange(0, 400, 4)
+        heavy_inlier = np.ones(n, dtype=bool)
+        heavy_inlier[heavy_idx] = False
+        x_heavy = x.copy()
+        y_heavy = y.copy()
+        x_heavy[heavy_idx] = cx - 1.0
+        y_heavy[heavy_idx] = cy + 1.0
+        u1_h, u2_h, tf_h = pca_normalize_xy(x_heavy, y_heavy)
+        cos_h = float(np.clip(np.dot(tf_h.rotation[0], true_r1), -1.0, 1.0))
+        assert float(np.degrees(np.arccos(cos_h))) < 0.2
+        assert tf_h.scales_u[1] == pytest.approx(4.0 * 0.003, rel=0.12)
+        assert abs(float(np.median(u1_h[heavy_inlier]))) < 1e-12
+        assert abs(float(np.median(u2_h[heavy_inlier]))) < 1e-12
+
+    def test_single_extreme_1e15_glitch_and_so2_rotational_equivariance(self):
+        rng = np.random.default_rng(108)
+        n = 400
+        dx = rng.uniform(-0.45, 0.45, size=n)
+        # Mild roll-arc curvature + cross-roll scatter (marginal median != rotated median)
+        eps = 0.015 * (dx**2 - float(np.mean(dx**2))) + rng.normal(0.0, 0.003, size=n)
+        x_clean = 1.8 + dx
+        y_clean = -0.9 + 0.30 * dx + eps
+
+        # 1) Single-cadence 1e15 and 5e11 glitches must NOT inflate rad_tol or shift center_xy
+        mask_no0 = np.ones(n, dtype=bool)
+        mask_no0[0] = False
+        tf_ref0 = fit_roll_pca(x_clean, y_clean, clean_mask=mask_no0)
+
+        for glitch_val in (1.0e15, -5.0e11):
+            x_gl = x_clean.copy()
+            y_gl = y_clean.copy()
+            x_gl[0] = glitch_val
+            y_gl[0] = -0.7 * glitch_val
+            tf_gl = fit_roll_pca(x_gl, y_gl)
+            npt.assert_allclose(tf_gl.center_xy, tf_ref0.center_xy, rtol=1e-12, atol=1e-12)
+            npt.assert_allclose(tf_gl.rotation, tf_ref0.rotation, rtol=1e-12, atol=1e-12)
+            npt.assert_allclose(tf_gl.scales_u, tf_ref0.scales_u, rtol=1e-12, atol=1e-12)
+
+        # 2) SO(2) rotational equivariance across arbitrary rotation angles (with asymmetric flyers)
+        x_eq = x_clean.copy()
+        y_eq = y_clean.copy()
+        x_eq[[12, 95, 210, 340]] += 8.0
+        y_eq[[12, 95, 210, 340]] -= 11.0
+        tf0 = fit_roll_pca(x_eq, y_eq)
+        u1_0, u2_0 = tf0.transform(x_eq, y_eq)
+
+        for deg in (23.5, -61.0, 142.0):
+            th = np.radians(deg)
+            q_mat = np.array(
+                [[np.cos(th), -np.sin(th)], [np.sin(th), np.cos(th)]],
+                dtype=np.float64,
+            )
+            xy_rot = q_mat @ np.vstack([x_eq, y_eq])
+            tf_q = fit_roll_pca(xy_rot[0], xy_rot[1])
+            u1_q, u2_q = tf_q.transform(xy_rot[0], xy_rot[1])
+
+            npt.assert_allclose(
+                tf_q.center_xy, q_mat @ tf0.center_xy, rtol=1e-11, atol=1e-11
+            )
+            npt.assert_allclose(tf_q.scales_u, tf0.scales_u, rtol=1e-11, atol=1e-11)
+            sign = 1.0 if float(np.dot(tf_q.rotation[0], q_mat @ tf0.rotation[0])) >= 0.0 else -1.0
+            npt.assert_allclose(tf_q.rotation, sign * (tf0.rotation @ q_mat.T), atol=1e-11)
+            npt.assert_allclose(u1_q, sign * u1_0, rtol=1e-11, atol=1e-11)
+            npt.assert_allclose(u2_q, sign * u2_0, rtol=1e-11, atol=1e-11)
+
     def test_outlier_trimming_clean_mask_and_nan_preservation(self):
         rng = np.random.default_rng(33)
         n = 400
@@ -257,6 +324,7 @@ class TestRollPCATransformGeometryAndScaling:
         tf_masked = fit_roll_pca(x_contaminated, y_contaminated, clean_mask=inlier_mask)
         tf_unmasked = fit_roll_pca(x_contaminated, y_contaminated)
 
+        npt.assert_allclose(tf_unmasked.center_xy, tf_masked.center_xy, rtol=1e-12, atol=1e-12)
         npt.assert_allclose(tf_unmasked.rotation, tf_masked.rotation, rtol=1e-12, atol=1e-12)
         npt.assert_allclose(tf_unmasked.scales_u, tf_masked.scales_u, rtol=1e-12, atol=1e-12)
         npt.assert_allclose(tf_unmasked.rotation, tf_clean_ref.rotation, atol=2e-3)
@@ -410,6 +478,8 @@ class TestEndToEndRollPCAPipelineAndCLI:
         y_orig = sim["y"].copy()
         x_orig[4] = np.nan
 
+        # Shared header object (as in SPLOXReader._cache.header) must NOT be mutated in-place
+        shared_hdr = pf.Header({"TELESCOP": "Kepler"})
         ds = K2Data(
             211436265,
             time=sim["time"],
@@ -419,6 +489,8 @@ class TestEndToEndRollPCAPipelineAndCLI:
             errors=sim["flux_err"],
             x=x_orig,
             y=y_orig,
+            primary_header=shared_hdr,
+            data_header=shared_hdr,
             campaign=5,
         )
         ds_x_before = ds.x.copy()
@@ -427,6 +499,9 @@ class TestEndToEndRollPCAPipelineAndCLI:
         ds_raw_y_before = ds.raw_y.copy()
 
         results = detrend_k2data(ds, splits=[2344.0], roll_pca=True, **_FAST_KW)
+        assert "ROLL_PCA" not in shared_hdr
+        assert "PCA_CX" not in shared_hdr
+        assert "ROLL_PCA" not in ds.primary_header
         assert len(results) == 1
         tf = results[0].pca_transform
         assert isinstance(tf, RollPCATransform)
@@ -441,6 +516,8 @@ class TestEndToEndRollPCAPipelineAndCLI:
         out_fits = tmp_path / "EPIC_211436265_mast.fits"
         FITSWriter.write(out_fits, results[0].splits, ds, results)
         with pf.open(out_fits) as hdul:
+            assert "ROLL_PCA" not in hdul[0].header
+            assert "PCA_CX" not in hdul[0].header
             hdr = hdul[1].header
             assert hdr["ROLL_PCA"] is True
             tf_from_hdr = RollPCATransform(
@@ -473,6 +550,15 @@ class TestEndToEndRollPCAPipelineAndCLI:
             assert hdul_raw[1].header["ROLL_PCA"] is False
             assert "PCA_CX" not in hdul_raw[1].header
             assert "PCA_S1" not in hdul_raw[1].header
+
+        # Writing the earlier roll_pca=True result AFTER ds was re-detrended with roll_pca=False
+        # must serialize ROLL_PCA=True and PCA_* directly from results[0].pca_transform
+        out_fits_sync = tmp_path / "EPIC_211436265_sync.fits"
+        FITSWriter.write(out_fits_sync, results[0].splits, ds, results)
+        with pf.open(out_fits_sync) as hdul_sync:
+            assert hdul_sync[1].header["ROLL_PCA"] is True
+            assert hdul_sync[1].header["PCA_CX"] == pytest.approx(tf.center_xy[0])
+            assert hdul_sync[1].header["PCA_S2"] == pytest.approx(tf.scales_u[1])
 
     def test_lightkurve_corrector_and_cli_no_roll_pca_flag(self, tmp_path, monkeypatch):
         sim = _make_collinear_k2_roll(n_pts=128, seed=88)
@@ -510,6 +596,14 @@ class TestEndToEndRollPCAPipelineAndCLI:
         assert corr_off.result.pca_transform is None
         assert clc_off.meta["K2SC_ROLL_PCA"] is False
         assert "K2SC_PCA_CENTER" not in clc_off.meta
+        # Re-correcting an already PCA-corrected LightCurve with roll_pca=False must purge stale K2SC_PCA_* meta
+        clc_reoff = K2SCCorrector(clc_on).correct(
+            splits=[2344.0], roll_pca=False, **_FAST_KW
+        )
+        assert clc_reoff.meta["K2SC_ROLL_PCA"] is False
+        assert "K2SC_PCA_CENTER" not in clc_reoff.meta
+        assert "K2SC_PCA_ROTATION" not in clc_reoff.meta
+        assert "K2SC_PCA_SCALES" not in clc_reoff.meta
         assert corr_on.cdpp_t < corr_off.cdpp_t
 
         # CLI argument parser default True and --no-roll-pca -> False

@@ -369,6 +369,57 @@ class FITSWriter:
             hdu.header[f"ker_hps{i + 1}"] = str(dtres[i].detrender.tr_pv).replace(
                 "\n", ""
             )
+        if len(dtres) > 0 and hasattr(dtres[0], "pca_transform"):
+            pca_tf = dtres[0].pca_transform
+            hdu.header["ROLL_PCA"] = (
+                pca_tf is not None,
+                "Spatial GP fitted in PCA roll coordinates",
+            )
+            if pca_tf is not None:
+                hdu.header["PCA_CX"] = (
+                    float(pca_tf.center_xy[0]),
+                    "Roll PCA x centre [pix]",
+                )
+                hdu.header["PCA_CY"] = (
+                    float(pca_tf.center_xy[1]),
+                    "Roll PCA y centre [pix]",
+                )
+                hdu.header["PCA_R11"] = (
+                    float(pca_tf.rotation[0, 0]),
+                    "Roll PCA rotation R[0,0]",
+                )
+                hdu.header["PCA_R12"] = (
+                    float(pca_tf.rotation[0, 1]),
+                    "Roll PCA rotation R[0,1]",
+                )
+                hdu.header["PCA_R21"] = (
+                    float(pca_tf.rotation[1, 0]),
+                    "Roll PCA rotation R[1,0]",
+                )
+                hdu.header["PCA_R22"] = (
+                    float(pca_tf.rotation[1, 1]),
+                    "Roll PCA rotation R[1,1]",
+                )
+                hdu.header["PCA_S1"] = (
+                    float(pca_tf.scales_u[0]),
+                    "Roll PCA u1 4-MAD scale [pix]",
+                )
+                hdu.header["PCA_S2"] = (
+                    float(pca_tf.scales_u[1]),
+                    "Roll PCA u2 4-MAD scale [pix]",
+                )
+            else:
+                for _pca_key in (
+                    "PCA_CX",
+                    "PCA_CY",
+                    "PCA_R11",
+                    "PCA_R12",
+                    "PCA_R21",
+                    "PCA_R22",
+                    "PCA_S1",
+                    "PCA_S2",
+                ):
+                    hdu.header.pop(_pca_key, None)
 
         primary_header = (
             data.primary_header.copy() if data.primary_header is not None else None

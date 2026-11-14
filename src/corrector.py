@@ -343,6 +343,10 @@ class K2SCCorrector(_BaseCorrector):
         cadence_mask : np.ndarray of bool, optional
             Lightkurve convention mask where ``True`` marks valid cadences to include
             in GP training/fitting and ``False`` excludes cadences from fitting.
+        roll_pca : bool, optional
+            If ``True`` (default), rotate spatial covariates into the robust
+            spacecraft-roll PCA frame and normalize each principal axis by
+            ``4 * sigma_MAD`` before fitting the spatial GP.
         transit_mask : tuple ``(t0, period, duration)`` or np.ndarray of bool, optional
             Either periodic transit ephemeris ``(t0, period, duration)`` in days, or
             a boolean array where ``True`` marks in-transit cadences to exclude from
@@ -430,6 +434,13 @@ class K2SCCorrector(_BaseCorrector):
         if res.ls_fap is not None:
             meta_updates["K2SC_LS_FAP"] = float(res.ls_fap)
         corrected_lc.meta.update(meta_updates)
+        if res.pca_transform is None:
+            for _pca_meta_key in (
+                "K2SC_PCA_CENTER",
+                "K2SC_PCA_ROTATION",
+                "K2SC_PCA_SCALES",
+            ):
+                corrected_lc.meta.pop(_pca_meta_key, None)
 
         res.lightcurve = corrected_lc
         with contextlib.suppress(Exception):
