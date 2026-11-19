@@ -9,14 +9,7 @@ import warnings
 
 import numpy as np
 
-from .dtdata import DtData
-from .gp import SplitGP
-from .kernels import BasicKernel
-
-try:
-    from .detrender import Detrender as _BaseDetrender
-except (ImportError, AttributeError):  # pragma: no cover - fallback before PR 4
-    _BaseDetrender = object
+from .detrender import Detrender as _BaseDetrender
 
 warnings.warn(
     "k2sc.segdetrender is deprecated and will be removed in a future release; "
@@ -40,6 +33,8 @@ class SegmentedDetrender(_BaseDetrender):
         tr_nrandom: int = 100,
         tr_bspan: int = 50,
         tr_nblocks: int = 5,
+        seed=None,
+        rng=None,
     ):
         warnings.warn(
             "SegmentedDetrender is deprecated; use Detrender(..., splits=...) instead.",
@@ -48,15 +43,19 @@ class SegmentedDetrender(_BaseDetrender):
         )
         splits_list = [] if splits is None else list(splits)
         self.splits = splits_list
-        self.data = DtData(flux, inputs, mask=mask)
-        self.kernel = kernel if kernel is not None else BasicKernel(p0=p0)
-        self.gp = SplitGP(self.kernel, splits=splits_list)
-        self.tr_data = self.data.create_training_set(
-            nrandom=tr_nrandom,
-            nblocks=tr_nblocks,
-            bspan=tr_bspan,
+        super().__init__(
+            flux,
+            inputs,
+            mask=mask,
+            p0=p0,
+            kernel=kernel,
+            splits=splits_list,
+            tr_nrandom=tr_nrandom,
+            tr_bspan=tr_bspan,
+            tr_nblocks=tr_nblocks,
+            seed=seed,
+            rng=rng,
         )
-        self.gp.set_inputs(self.tr_data.masked_inputs)
 
     def _get_mask(self, t1, t2, splits=None) -> np.ndarray:
         """Create a boolean piecewise-segment covariance mask from split timestamps."""
@@ -106,11 +105,32 @@ class SegmentedDetrender(_BaseDetrender):
         flux=None,
         inputs=None,
         inputs_pred=None,
+        components: bool = False,
         mean_only: bool = True,
         splits=None,
     ):
         if splits is not None:
             self.gp.splits = splits
+        if components:
+            q_inputs = (
+                inputs_pred
+                if inputs_pred is not None
+                else (inputs if inputs is not None else self.data.unmasked_inputs)
+            )
+            if flux is not None and inputs is not None and inputs_pred is not None:
+                self.gp.compute(x=inputs, pv=pv)
+                self.gp._compute_alpha(flux, allow_jitter_fallback=True)
+                mu_time, mu_pos = self.gp.predict_components(q_inputs)
+                return (
+                    (1.0 + mu_time) * self.data._fm,
+                    (1.0 + mu_pos) * self.data._fm,
+                )
+            return super().predict(
+                pv,
+                inputs=q_inputs,
+                components=True,
+                mean_only=mean_only,
+            )
         y = flux if flux is not None else self.data.masked_normalised_flux
         x_tr = inputs if inputs is not None else self.data.masked_inputs
         x_pr = inputs_pred if inputs_pred is not None else x_tr

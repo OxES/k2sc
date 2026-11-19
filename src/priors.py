@@ -1,19 +1,19 @@
-""" Module defining priors.
+"""Module defining priors.
 
-    Copyright (C) 2016  Suzanne Aigrain
+Copyright (C) 2016  Suzanne Aigrain
 
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
 
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
 
-    You should have received a copy of the GNU General Public License
-    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 """
 
 from __future__ import annotations
@@ -46,7 +46,9 @@ class PriorSpec(NamedTuple):
 
 
 @jax.jit
-def _uniform_logpdf_core(x_arr: jax.Array, vmin: float, vmax: float, ln_c: float) -> jax.Array:
+def _uniform_logpdf_core(
+    x_arr: jax.Array, vmin: float, vmax: float, ln_c: float
+) -> jax.Array:
     in_bounds = (x_arr >= vmin) & (x_arr <= vmax) & jnp.isfinite(x_arr)
     return jnp.where(in_bounds, jnp.full_like(x_arr, ln_c), -jnp.inf)
 
@@ -66,7 +68,7 @@ def _lognorm_logpdf_core(
     x_arr: jax.Array, vmin: float, vmax: float, mu: float, sigma: float, c_const: float
 ) -> jax.Array:
     is_pos_finite = (x_arr > 0.0) & jnp.isfinite(x_arr)
-    in_bounds = is_pos_finite & (x_arr > vmin) & (x_arr <= vmax)
+    in_bounds = is_pos_finite & (x_arr >= vmin) & (x_arr <= vmax)
     safe_x = jnp.where(is_pos_finite, x_arr, jnp.ones_like(x_arr))
     lnx = jnp.log(safe_x)
     val = -lnx + c_const - 0.5 * jnp.square((lnx - mu) / sigma)
@@ -103,7 +105,7 @@ class UniformPrior(Prior):
 
 
 class NormalPrior(Prior):
-    """Truncated or unbounded Gaussian prior on [vmin, vmax]."""
+    """Truncated or unbounded Gaussian prior on [vmin, vmax] (unnormalized wrt lims)."""
 
     def __init__(self, mu: float, sigma: float, lims=None):
         lims_pair = (-np.inf, np.inf) if lims is None else lims
@@ -127,7 +129,7 @@ class NormalPrior(Prior):
 
 
 class LogNormPrior(Prior):
-    """Log-normal prior on (max(0, vmin), vmax] with autodiff-safe boundary evaluation."""
+    """Log-normal prior on [vmin, vmax] intersected with (0, inf) (unnormalized wrt lims)."""
 
     def __init__(self, mu: float, sigma: float, lims=None):
         lims_pair = (0.0, np.inf) if lims is None else lims
@@ -197,7 +199,9 @@ def _eval_ln_prior_core(pv_arr: jax.Array, prior_spec: PriorSpec) -> jax.Array:
     sigma = jnp.where(prior_spec.sigma > 0.0, prior_spec.sigma, 1.0)
 
     span = vmax - vmin
-    safe_span = jnp.where((kind == PRIOR_UNIFORM) & (span > 0.0) & jnp.isfinite(span), span, 1.0)
+    safe_span = jnp.where(
+        (kind == PRIOR_UNIFORM) & (span > 0.0) & jnp.isfinite(span), span, 1.0
+    )
     u_val = -jnp.log(safe_span)
 
     safe_norm_x = jnp.where(jnp.isfinite(pv_arr), pv_arr, mu)
@@ -219,7 +223,7 @@ def _eval_ln_prior_core(pv_arr: jax.Array, prior_spec: PriorSpec) -> jax.Array:
         [
             (pv_arr >= vmin) & (pv_arr <= vmax) & jnp.isfinite(pv_arr),
             (pv_arr >= vmin) & (pv_arr <= vmax) & jnp.isfinite(pv_arr),
-            is_pos_finite & (pv_arr > vmin) & (pv_arr <= vmax),
+            is_pos_finite & (pv_arr >= vmin) & (pv_arr <= vmax),
         ],
         default=False,
     )
