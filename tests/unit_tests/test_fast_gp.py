@@ -41,6 +41,7 @@ from k2sc.kernels import (
 )
 from k2sc.optimizers import (
     MultiStartLBFGSBOptimizer,
+    _compute_coordinate_scales,
     _eval_candidates_chunked,
     _finite_box_bounds,
     _generate_candidates,
@@ -56,6 +57,7 @@ from k2sc.optimizers import (
     _sanitize_pv_bounds,
     _select_diverse_top_k,
     _unconstrained_to_pv_jax,
+    compute_box_bounds,
     compute_closed_lims,
 )
 from k2sc.priors import eval_ln_prior_jax
@@ -204,8 +206,12 @@ def test_vectorized_tinygp_kernels_diagonal_rectangular_and_conditioned_parity(
     assert dtot_fast.shape == (X_tr_rel.shape[0],)
     assert dsum_fast.shape == (X_tr_rel.shape[0],)
 
-    npt.assert_allclose(np.asarray(d1_fast), np.asarray(k1_ref(X_tr_rel)), rtol=1e-12, atol=1e-12)
-    npt.assert_allclose(np.asarray(d2_fast), np.asarray(k2_ref(X_tr_rel)), rtol=1e-12, atol=1e-12)
+    npt.assert_allclose(
+        np.asarray(d1_fast), np.asarray(k1_ref(X_tr_rel)), rtol=1e-12, atol=1e-12
+    )
+    npt.assert_allclose(
+        np.asarray(d2_fast), np.asarray(k2_ref(X_tr_rel)), rtol=1e-12, atol=1e-12
+    )
     npt.assert_allclose(
         np.asarray(dtot_fast), np.asarray(k_tot_ref(X_tr_rel)), rtol=1e-12, atol=1e-12
     )
@@ -241,8 +247,12 @@ def test_vectorized_tinygp_kernels_diagonal_rectangular_and_conditioned_parity(
     K2_rect_ref = k2_ref(X_full_rel, X_tr_rel)
     Ktot_rect_ref = k_tot_ref(X_full_rel, X_tr_rel)
 
-    npt.assert_allclose(np.asarray(K1_rect_fast), np.asarray(K1_rect_ref), rtol=1e-12, atol=1e-12)
-    npt.assert_allclose(np.asarray(K2_rect_fast), np.asarray(K2_rect_ref), rtol=1e-12, atol=1e-12)
+    npt.assert_allclose(
+        np.asarray(K1_rect_fast), np.asarray(K1_rect_ref), rtol=1e-12, atol=1e-12
+    )
+    npt.assert_allclose(
+        np.asarray(K2_rect_fast), np.asarray(K2_rect_ref), rtol=1e-12, atol=1e-12
+    )
     npt.assert_allclose(
         np.asarray(Ktot_rect_fast), np.asarray(Ktot_rect_ref), rtol=1e-12, atol=1e-12
     )
@@ -297,7 +307,9 @@ def test_analytic_lnlike_and_grad_precomputed_vs_reference_autodiff_and_fd(
     def _ref_gp_lnlike(p_vec: jax.Array) -> jax.Array:
         X_rel, splits_rel = _shift_time_origin(X_tr, s_pad, X_tr[0, 0])
         _, _, diag_r = build_tinygp_kernels(p_vec, splits_rel, kid)
-        gp_r = tinygp.GaussianProcess(K2SCKernel(p_vec, splits_rel, kid), X_rel, diag=diag_r)
+        gp_r = tinygp.GaussianProcess(
+            K2SCKernel(p_vec, splits_rel, kid), X_rel, diag=diag_r
+        )
         return gp_r.log_probability(y_tr)
 
     lp_ref, grad_ref = jax.jit(jax.value_and_grad(_ref_gp_lnlike))(pv)
@@ -366,7 +378,9 @@ def test_jit_val_and_grad_posterior_priors_and_oob_safety(
 
         with monkeypatch.context() as mp:
             mp.setattr(opt_mod, "precompute_pairwise_jax", _counted_precomp)
-            dt.optimize(optimizer="multistart", n_candidates=8, top_k=1, maxiter=2, seed=0)
+            dt.optimize(
+                optimizer="multistart", n_candidates=8, top_k=1, maxiter=2, seed=0
+            )
         assert recompute_calls["n"] == 0
         assert dt._precomp_tr is precomp
 
@@ -381,8 +395,12 @@ def test_jit_val_and_grad_posterior_priors_and_oob_safety(
 
     npt.assert_allclose(float(val_fast), float(val_ad), rtol=1e-11, atol=1e-11)
     npt.assert_allclose(float(val_pre), float(val_ad), rtol=1e-11, atol=1e-11)
-    npt.assert_allclose(np.asarray(grad_fast), np.asarray(grad_ad), rtol=1e-11, atol=1e-11)
-    npt.assert_allclose(np.asarray(grad_pre), np.asarray(grad_ad), rtol=1e-11, atol=1e-11)
+    npt.assert_allclose(
+        np.asarray(grad_fast), np.asarray(grad_ad), rtol=1e-11, atol=1e-11
+    )
+    npt.assert_allclose(
+        np.asarray(grad_pre), np.asarray(grad_ad), rtol=1e-11, atol=1e-11
+    )
 
     # Out-of-bounds and non-finite inputs must return (+inf, zeros) cleanly
     for bad_pv in (
@@ -455,7 +473,9 @@ def test_singular_cholesky_and_overflowing_grad_rejected_cleanly():
     # within float64 (lp finite) while back-substitution alpha / outer(alpha, alpha)
     # overflows float64 (||z||^2 < 1.8e308, while alpha_0^2 > 1.8e308 -> inf!).
     t_grid = np.linspace(2300.0, 2315.0, 16, dtype=np.float64)
-    X_well = np.column_stack([t_grid, np.linspace(-0.2, 0.2, 16), np.linspace(0.2, -0.2, 16)])
+    X_well = np.column_stack(
+        [t_grid, np.linspace(-0.2, 0.2, 16), np.linspace(0.2, -0.2, 16)]
+    )
     y_huge = np.zeros(16, dtype=np.float64)
     y_huge[0] = 1.0e150
 
@@ -468,7 +488,9 @@ def test_singular_cholesky_and_overflowing_grad_rejected_cleanly():
 
     # Confirm forward log-likelihood alone is finite, proving this exercises the grad-overflow guard
     lp_only = float(
-        eval_gp_lnlike_precomputed_jax(pv_small_noise, precomp_well, y_huge_jax, KERNEL_BASIC)
+        eval_gp_lnlike_precomputed_jax(
+            pv_small_noise, precomp_well, y_huge_jax, KERNEL_BASIC
+        )
     )
     assert np.isfinite(lp_only)
 
@@ -530,7 +552,9 @@ def test_optx_custom_vjp_batch_parity_and_infeasible_grad_safety(canonical_gp_da
         cl_high: jax.Array,
         prior_spec,
     ):
-        def _loss_z_optx(z: jax.Array, precomp_arg: PrecomputedPairwise, y_arg: jax.Array):
+        def _loss_z_optx(
+            z: jax.Array, precomp_arg: PrecomputedPairwise, y_arg: jax.Array
+        ):
             pv = _unconstrained_to_pv_jax(z, cl_low, cl_high)
             in_bounds, _, safe_pv, _, _ = _sanitize_pv_bounds(pv, l_low, l_high)
             ln_p = eval_ln_prior_jax(safe_pv, prior_spec)
@@ -540,22 +564,32 @@ def test_optx_custom_vjp_batch_parity_and_infeasible_grad_safety(canonical_gp_da
             both_fin = jnp.isfinite(cl_low) & jnp.isfinite(cl_high)
             z_excess = jnp.where(both_fin, jnp.maximum(0.0, jnp.abs(z) - 14.0), 0.0)
             wall = 1e-8 * jnp.sum(jnp.square(z_excess))
-            return jnp.where(jnp.isfinite(val), val + wall, jnp.asarray(1e30, dtype=jnp.float64))
+            return jnp.where(
+                jnp.isfinite(val), val + wall, jnp.asarray(1e30, dtype=jnp.float64)
+            )
 
-        def _loss_z_ref(z: jax.Array, X_arg: jax.Array, s_arg: jax.Array, y_arg: jax.Array):
+        def _loss_z_ref(
+            z: jax.Array, X_arg: jax.Array, s_arg: jax.Array, y_arg: jax.Array
+        ):
             pv = _unconstrained_to_pv_jax(z, cl_low, cl_high)
-            val = _neglnposterior_impl(pv, X_arg, y_arg, s_arg, l_low, l_high, prior_spec, kid)
+            val = _neglnposterior_impl(
+                pv, X_arg, y_arg, s_arg, l_low, l_high, prior_spec, kid
+            )
             both_fin = jnp.isfinite(cl_low) & jnp.isfinite(cl_high)
             z_excess = jnp.where(both_fin, jnp.maximum(0.0, jnp.abs(z) - 14.0), 0.0)
             wall = 1e-8 * jnp.sum(jnp.square(z_excess))
-            return jnp.where(jnp.isfinite(val), val + wall, jnp.asarray(1e30, dtype=jnp.float64))
+            return jnp.where(
+                jnp.isfinite(val), val + wall, jnp.asarray(1e30, dtype=jnp.float64)
+            )
 
         return _loss_z_optx, _loss_z_ref
 
     loss_qp_optx, loss_qp_ref = _make_loss_z_pair(
         kernel.kernel_id, lims_low, lims_high, c_low, c_high, kernel.prior_spec
     )
-    batch_vg_optx = jax.jit(jax.vmap(jax.value_and_grad(loss_qp_optx), in_axes=(0, None, None)))
+    batch_vg_optx = jax.jit(
+        jax.vmap(jax.value_and_grad(loss_qp_optx), in_axes=(0, None, None))
+    )
     batch_vg_ref = jax.jit(
         jax.vmap(jax.value_and_grad(loss_qp_ref), in_axes=(0, None, None, None))
     )
@@ -575,8 +609,12 @@ def test_optx_custom_vjp_batch_parity_and_infeasible_grad_safety(canonical_gp_da
 
     vals_optx, grads_optx = batch_vg_optx(z_batch, precomp, y_tr)
     vals_ref, grads_ref = batch_vg_ref(z_batch, X_tr, s_pad, y_tr)
-    npt.assert_allclose(np.asarray(vals_optx), np.asarray(vals_ref), rtol=1e-11, atol=1e-11)
-    npt.assert_allclose(np.asarray(grads_optx), np.asarray(grads_ref), rtol=1e-11, atol=1e-11)
+    npt.assert_allclose(
+        np.asarray(vals_optx), np.asarray(vals_ref), rtol=1e-11, atol=1e-11
+    )
+    npt.assert_allclose(
+        np.asarray(grads_optx), np.asarray(grads_ref), rtol=1e-11, atol=1e-11
+    )
 
     # Infeasible Cholesky-singular and analytic-gradient-overflowing batches must yield (1e30, 0)
     k_basic = BasicKernel()
@@ -633,14 +671,20 @@ def test_optx_custom_vjp_batch_parity_and_infeasible_grad_safety(canonical_gp_da
     batch_sing_vg = jax.jit(
         jax.vmap(jax.value_and_grad(loss_sing_optx), in_axes=(0, None, None))
     )
-    z_sing = _pv_to_unconstrained_np(pv_sing_batch, b_closed_sing[:, 0], b_closed_sing[:, 1])
+    z_sing = _pv_to_unconstrained_np(
+        pv_sing_batch, b_closed_sing[:, 0], b_closed_sing[:, 1]
+    )
     z_sing[1, 0] = 16.0
-    v_sing, g_sing = batch_sing_vg(jnp.asarray(z_sing, dtype=jnp.float64), precomp_dup, y_dup)
+    v_sing, g_sing = batch_sing_vg(
+        jnp.asarray(z_sing, dtype=jnp.float64), precomp_dup, y_dup
+    )
     npt.assert_array_equal(np.asarray(v_sing), np.full(2, 1e30))
     npt.assert_array_equal(np.asarray(g_sing), np.zeros((2, 6)))
 
     t_grid = np.linspace(2300.0, 2315.0, 16, dtype=np.float64)
-    X_well = np.column_stack([t_grid, np.linspace(-0.2, 0.2, 16), np.linspace(0.2, -0.2, 16)])
+    X_well = np.column_stack(
+        [t_grid, np.linspace(-0.2, 0.2, 16), np.linspace(0.2, -0.2, 16)]
+    )
     y_huge = np.zeros(16, dtype=np.float64)
     y_huge[0] = 1.0e150
     precomp_well = precompute_pairwise_jax(jnp.asarray(X_well), pad_splits(None))
@@ -653,13 +697,17 @@ def test_optx_custom_vjp_batch_parity_and_infeasible_grad_safety(canonical_gp_da
     z_ovf = _pv_to_unconstrained_np(pv_ovf_batch, b_closed[:, 0], b_closed[:, 1])
     z_ovf[1, 2] = -16.0
     v_ovf, g_ovf = batch_basic_vg(
-        jnp.asarray(z_ovf, dtype=jnp.float64), precomp_well, jnp.asarray(y_huge, dtype=jnp.float64)
+        jnp.asarray(z_ovf, dtype=jnp.float64),
+        precomp_well,
+        jnp.asarray(y_huge, dtype=jnp.float64),
     )
     npt.assert_array_equal(np.asarray(v_ovf), np.full(2, 1e30))
     npt.assert_array_equal(np.asarray(g_ovf), np.zeros((2, 6)))
 
 
-def test_eval_candidates_chunked_static_shapes_and_vmap_map_parity(canonical_gp_dataset):
+def test_eval_candidates_chunked_static_shapes_and_vmap_map_parity(
+    canonical_gp_dataset,
+):
     """Verify exact parity across scalar, static-chunk lax.map, and vmap batch evaluators."""
     X_tr = jnp.asarray(canonical_gp_dataset["X_tr"], dtype=jnp.float64)
     y_tr = jnp.asarray(canonical_gp_dataset["y_tr"], dtype=jnp.float64)
@@ -730,13 +778,25 @@ def test_eval_candidates_chunked_static_shapes_and_vmap_map_parity(canonical_gp_
     cands_19_jax = jnp.asarray(cands_19, dtype=jnp.float64)
     vals_map_19 = np.asarray(
         _jit_map_neglnposterior_precomputed(
-            cands_19_jax, precomp, y_tr, lims_low, lims_high, kernel.prior_spec, kernel.kernel_id
+            cands_19_jax,
+            precomp,
+            y_tr,
+            lims_low,
+            lims_high,
+            kernel.prior_spec,
+            kernel.kernel_id,
         ),
         dtype=np.float64,
     )
     vals_vmap_19 = np.asarray(
         _jit_vmap_neglnposterior_precomputed(
-            cands_19_jax, precomp, y_tr, lims_low, lims_high, kernel.prior_spec, kernel.kernel_id
+            cands_19_jax,
+            precomp,
+            y_tr,
+            lims_low,
+            lims_high,
+            kernel.prior_spec,
+            kernel.kernel_id,
         ),
         dtype=np.float64,
     )
@@ -750,7 +810,8 @@ def test_eval_candidates_chunked_static_shapes_and_vmap_map_parity(canonical_gp_
         row_pv = jnp.asarray(cands_19[idx], dtype=jnp.float64)
         _, _, diag_cand = build_tinygp_kernels(row_pv, splits_rel, kernel.kernel_id)
         K_cand = np.asarray(
-            K2SCKernel(row_pv, splits_rel, kernel.kernel_id)(X_rel, X_rel) + diag_cand * eye_n,
+            K2SCKernel(row_pv, splits_rel, kernel.kernel_id)(X_rel, X_rel)
+            + diag_cand * eye_n,
             dtype=np.float64,
         )
         cond_k = float(np.linalg.cond(K_cand))
@@ -848,14 +909,48 @@ def test_multistart_lbfgsb_harmonic_trap_map_parity(canonical_gp_dataset):
     ref_vg_jit = functools.partial(jax.jit, static_argnames=("kernel_id",))(
         jax.value_and_grad(_neglnposterior_impl)
     )
-    c_arr = np.asarray(closed_lims, dtype=np.float64)
+    box_bounds = compute_box_bounds(
+        kernel.lims, prior_spec=kernel.prior_spec, kernel_id=kernel.kernel_id
+    )
+    box_arr = np.asarray(box_bounds, dtype=np.float64)
+    box_low = box_arr[:, 0]
+    box_high = box_arr[:, 1]
     best_ref_fun = float("inf")
     uncached_same_grad_nfev = int(cands.shape[0])
     best_same_grad_fun = float("inf")
     for x_seed in seeds:
-        x0_clip = np.clip(np.asarray(x_seed, dtype=np.float64), c_arr[:, 0], c_arr[:, 1])
+        x0_clip = np.clip(np.asarray(x_seed, dtype=np.float64), box_low, box_high)
+        scales = _compute_coordinate_scales(
+            x0_clip,
+            box_low,
+            box_high,
+            kernel.prior_spec,
+            kernel_id=kernel.kernel_id,
+            kernel_bounds=kernel.bounds,
+        )
+        ref_pt = x0_clip.copy()
+        theta_bounds = list(
+            zip(
+                np.where(
+                    np.isfinite(box_low), (box_low - ref_pt) / scales, -np.inf
+                ).tolist(),
+                np.where(
+                    np.isfinite(box_high), (box_high - ref_pt) / scales, np.inf
+                ).tolist(),
+                strict=True,
+            )
+        )
 
-        def _ref_cb(x_vec: np.ndarray) -> tuple[float, np.ndarray]:
+        def _ref_cb(
+            theta_vec: np.ndarray,
+            _ref: np.ndarray = ref_pt,
+            _scales: np.ndarray = scales,
+        ) -> tuple[float, np.ndarray]:
+            x_vec = np.clip(
+                _ref + _scales * np.asarray(theta_vec, dtype=np.float64),
+                box_low,
+                box_high,
+            )
             vj, gj = ref_vg_jit(
                 jnp.asarray(x_vec, dtype=jnp.float64),
                 X_jax,
@@ -867,29 +962,38 @@ def test_multistart_lbfgsb_harmonic_trap_map_parity(canonical_gp_dataset):
                 kernel.kernel_id,
             )
             vf = float(vj)
-            gf = np.asarray(gj, dtype=np.float64)
+            gf = _scales * np.asarray(gj, dtype=np.float64)
             if not np.isfinite(vf) or not np.all(np.isfinite(gf)):
-                return 1e30, np.zeros_like(x_vec, dtype=np.float64)
+                return 1e30, np.zeros_like(theta_vec, dtype=np.float64)
             return vf, gf
 
-        init_v, _ = _ref_cb(x0_clip)
+        init_v, _ = _ref_cb(np.zeros_like(x0_clip))
         mres = minimize(
             _ref_cb,
-            x0_clip,
+            np.zeros_like(x0_clip),
             method="L-BFGS-B",
             jac=True,
-            bounds=closed_lims,
+            bounds=theta_bounds,
             options={"ftol": 1e-9, "gtol": 1e-6, "maxiter": 200},
         )
-        fin_v, _ = _ref_cb(np.clip(np.asarray(mres.x, dtype=np.float64), c_arr[:, 0], c_arr[:, 1]))
+        fin_v, _ = _ref_cb(np.asarray(mres.x, dtype=np.float64))
         best_ref_fun = min(best_ref_fun, init_v, fin_v)
 
         # Deterministic deduplication check: uncached callback using the *identical*
-        # analytic _jit_val_and_grad_precomputed follows the exact same L-BFGS-B iterates,
-        # so consecutive-point caching saves >= 1 boundary call per seed (at x0_clip).
-        def _same_grad_uncached_cb(x_vec: np.ndarray) -> tuple[float, np.ndarray]:
+        # preconditioned analytic _jit_val_and_grad_precomputed follows the exact same
+        # L-BFGS-B iterates, so consecutive-point caching saves >= 1 boundary call per seed.
+        def _same_grad_uncached_cb(
+            theta_vec: np.ndarray,
+            _ref: np.ndarray = ref_pt,
+            _scales: np.ndarray = scales,
+        ) -> tuple[float, np.ndarray]:
             nonlocal uncached_same_grad_nfev
             uncached_same_grad_nfev += 1
+            x_vec = np.clip(
+                _ref + _scales * np.asarray(theta_vec, dtype=np.float64),
+                box_low,
+                box_high,
+            )
             vj, gj = _jit_val_and_grad_precomputed(
                 jnp.asarray(x_vec, dtype=jnp.float64),
                 precomp,
@@ -900,23 +1004,21 @@ def test_multistart_lbfgsb_harmonic_trap_map_parity(canonical_gp_dataset):
                 kernel.kernel_id,
             )
             vf = float(vj)
-            gf = np.asarray(gj, dtype=np.float64)
+            gf = _scales * np.asarray(gj, dtype=np.float64)
             if not np.isfinite(vf) or not np.all(np.isfinite(gf)):
-                return 1e30, np.zeros_like(x_vec, dtype=np.float64)
+                return 1e30, np.zeros_like(theta_vec, dtype=np.float64)
             return vf, gf
 
-        init_sg, _ = _same_grad_uncached_cb(x0_clip)
+        init_sg, _ = _same_grad_uncached_cb(np.zeros_like(x0_clip))
         mres_sg = minimize(
             _same_grad_uncached_cb,
-            x0_clip,
+            np.zeros_like(x0_clip),
             method="L-BFGS-B",
             jac=True,
-            bounds=closed_lims,
+            bounds=theta_bounds,
             options={"ftol": 1e-9, "gtol": 1e-6, "maxiter": 200},
         )
-        fin_sg, _ = _same_grad_uncached_cb(
-            np.clip(np.asarray(mres_sg.x, dtype=np.float64), c_arr[:, 0], c_arr[:, 1])
-        )
+        fin_sg, _ = _same_grad_uncached_cb(np.asarray(mres_sg.x, dtype=np.float64))
         best_same_grad_fun = min(best_same_grad_fun, init_sg, fin_sg)
 
     npt.assert_allclose(res_fast.fun, best_ref_fun, rtol=0.0, atol=1e-6)
@@ -990,9 +1092,7 @@ def test_configure_single_thread_env_idempotence_and_fresh_subprocess(monkeypatc
         "assert jnp.zeros(1).dtype == jnp.float64\n"
     )
     sub_env = {
-        k: v
-        for k, v in os.environ.items()
-        if k not in (*thread_vars, "XLA_FLAGS")
+        k: v for k, v in os.environ.items() if k not in (*thread_vars, "XLA_FLAGS")
     }
     sub_env["JAX_ENABLE_X64"] = "0"
     proc = subprocess.run(
@@ -1002,4 +1102,6 @@ def test_configure_single_thread_env_idempotence_and_fresh_subprocess(monkeypatc
         text=True,
         check=False,
     )
-    assert proc.returncode == 0, f"Subprocess failed:\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+    assert proc.returncode == 0, (
+        f"Subprocess failed:\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+    )

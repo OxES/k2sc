@@ -23,7 +23,9 @@ from .kernels import (
     K2SCKernel,
     _normalize_kernel_id,
     _safe_abs,
+    _safe_sqrt_zero,
     build_tinygp_kernels,
+    canonicalize_inputs_jax,
     pad_splits,
 )
 
@@ -71,13 +73,27 @@ class _BlockMaskedKernel(tinygp.kernels.Kernel):
         return jnp.where(m > 0.0, m * val, jnp.zeros_like(val))
 
 
+def _canonicalize_inputs_np(x) -> np.ndarray:
+    """Validate and canonicalize (N, 2) [t, x] or (N, 3) [t, x, y] host arrays to (N, 3) float64."""
+    x_arr = np.asarray(as_f64(x), dtype=np.float64)
+    if x_arr.ndim != 2 or x_arr.shape[1] not in (2, 3):
+        raise ValueError(
+            f"Expected 2D input coordinates with shape (N, 2) or (N, 3), got {x_arr.shape}."
+        )
+    if x_arr.shape[1] == 2:
+        return np.column_stack([x_arr, np.zeros(x_arr.shape[0], dtype=np.float64)])
+    return x_arr.copy()
+
+
 def _shift_time_origin(
     X: jax.Array,
     splits_padded: jax.Array,
     t_ref: jax.Array,
 ) -> tuple[jax.Array, jax.Array]:
     X_rel = X.at[:, 0].add(-t_ref)
-    splits_rel = jnp.where(jnp.isfinite(splits_padded), splits_padded - t_ref, splits_padded)
+    splits_rel = jnp.where(
+        jnp.isfinite(splits_padded), splits_padded - t_ref, splits_padded
+    )
     return X_rel, splits_rel
 
 
@@ -87,7 +103,7 @@ def precompute_pairwise_jax(
     splits_padded: jax.Array,
 ) -> PrecomputedPairwise:
     """Precompute pairwise coordinate differences and split block mask for fixed X_fit."""
-    X_arr = as_f64(X_fit)
+    X_arr = canonicalize_inputs_jax(X_fit)
     s_arr = as_f64(splits_padded)
     n = X_arr.shape[0]
     if n > 0:
@@ -139,7 +155,7 @@ def _assemble_precomputed_components(
     if kid == KERNEL_BASIC_EP:
         K1 = (10.0 ** p[0]) * jnp.exp(-0.5 * p[1] * precomp.dt2)
         K2_raw = (10.0 ** p[2]) * jnp.exp(
-            -jnp.sqrt(p[3]) * precomp.dx - jnp.sqrt(p[4]) * precomp.dy
+            -_safe_sqrt_zero(p[3]) * precomp.dx - _safe_sqrt_zero(p[4]) * precomp.dy
         )
         K2 = jnp.where(precomp.same_seg, K2_raw, 0.0)
         diag = 10.0 ** (2.0 * p[5])
@@ -165,7 +181,7 @@ def _assemble_precomputed_components(
         s2 = jnp.square(s)
         K1 = (10.0 ** p[0]) * jnp.exp(-s2 / p[1] - 0.5 * p[3] * precomp.dt2)
         K2_raw = (10.0 ** p[4]) * jnp.exp(
-            -jnp.sqrt(p[5]) * precomp.dx - jnp.sqrt(p[6]) * precomp.dy
+            -_safe_sqrt_zero(p[5]) * precomp.dx - _safe_sqrt_zero(p[6]) * precomp.dy
         )
         K2 = jnp.where(precomp.same_seg, K2_raw, 0.0)
         diag = 10.0 ** (2.0 * p[7])
@@ -275,13 +291,25 @@ def _eval_gp_lnlike_and_grad_precomputed_raw(
         )
     elif kid == KERNEL_BASIC_EP:
         WK1 = W * K1a
+        safe_p3 = jnp.where(p[3] > 0.0, p[3], 1.0)
+        safe_p4 = jnp.where(p[4] > 0.0, p[4], 1.0)
+        gx_ep = jnp.where(
+            p[3] > 0.0,
+            (-0.5 / jnp.sqrt(safe_p3)) * jnp.sum(WK2 * precomp.dx),
+            0.0,
+        )
+        gy_ep = jnp.where(
+            p[4] > 0.0,
+            (-0.5 / jnp.sqrt(safe_p4)) * jnp.sum(WK2 * precomp.dy),
+            0.0,
+        )
         grad = jnp.stack(
             [
                 _LN10 * jnp.sum(WK1),
                 -0.5 * jnp.sum(WK1 * precomp.dt2),
                 _LN10 * jnp.sum(WK2),
-                (-0.5 / jnp.sqrt(p[3])) * jnp.sum(WK2 * precomp.dx),
-                (-0.5 / jnp.sqrt(p[4])) * jnp.sum(WK2 * precomp.dy),
+                gx_ep,
+                gy_ep,
                 g_wn,
             ]
         )
@@ -304,6 +332,18 @@ def _eval_gp_lnlike_and_grad_precomputed_raw(
     elif kid == KERNEL_QUASIPERIODIC_EP:
         assert s is not None and c is not None and s2 is not None
         WK1 = W * K1a
+        safe_p5 = jnp.where(p[5] > 0.0, p[5], 1.0)
+        safe_p6 = jnp.where(p[6] > 0.0, p[6], 1.0)
+        gx_ep = jnp.where(
+            p[5] > 0.0,
+            (-0.5 / jnp.sqrt(safe_p5)) * jnp.sum(WK2 * precomp.dx),
+            0.0,
+        )
+        gy_ep = jnp.where(
+            p[6] > 0.0,
+            (-0.5 / jnp.sqrt(safe_p6)) * jnp.sum(WK2 * precomp.dy),
+            0.0,
+        )
         grad = jnp.stack(
             [
                 _LN10 * jnp.sum(WK1),
@@ -312,8 +352,8 @@ def _eval_gp_lnlike_and_grad_precomputed_raw(
                 * jnp.sum(WK1 * (s * c * precomp.dt)),
                 -0.5 * jnp.sum(WK1 * precomp.dt2),
                 _LN10 * jnp.sum(WK2),
-                (-0.5 / jnp.sqrt(p[5])) * jnp.sum(WK2 * precomp.dx),
-                (-0.5 / jnp.sqrt(p[6])) * jnp.sum(WK2 * precomp.dy),
+                gx_ep,
+                gy_ep,
                 g_wn,
             ]
         )
@@ -357,7 +397,7 @@ def _eval_gp_lnlike_raw(
     kernel_id: int,
 ) -> jax.Array:
     """Pure-JAX normalized Gaussian log-likelihood (including -0.5 * M * ln(2*pi))."""
-    X_arr = as_f64(X_fit)
+    X_arr = canonicalize_inputs_jax(X_fit)
     y_arr = as_f64(y_fit)
     p_arr = as_f64(pv)
     s_arr = as_f64(splits_padded)
@@ -394,7 +434,7 @@ def eval_gp_lnlike_masked_jax(
     kernel_id: int,
 ) -> jax.Array:
     """Static-shape block-identity masked log-likelihood matching sliced X[mask], y[mask]."""
-    X_arr = as_f64(X)
+    X_arr = canonicalize_inputs_jax(X)
     y_arr = as_f64(y)
     p_arr = as_f64(pv)
     s_arr = as_f64(splits_padded)
@@ -404,7 +444,9 @@ def eval_gp_lnlike_masked_jax(
     idx0 = jnp.argmax(mask_bool)
     has_valid = jnp.any(mask_bool)
     raw_t0 = X_arr[idx0, 0]
-    t_ref = jnp.where(has_valid & jnp.isfinite(raw_t0), raw_t0, jnp.asarray(0.0, dtype=jnp.float64))
+    t_ref = jnp.where(
+        has_valid & jnp.isfinite(raw_t0), raw_t0, jnp.asarray(0.0, dtype=jnp.float64)
+    )
 
     X_clean_raw = jnp.where(mask_bool[:, None], X_arr, 0.0)
     X_rel, splits_rel = _shift_time_origin(X_clean_raw, s_arr, t_ref)
@@ -434,7 +476,7 @@ def predict_components_masked_jax(
     X_test: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     """Static-shape block-identity masked component prediction (zero JIT recompilation)."""
-    X_arr = as_f64(X)
+    X_arr = canonicalize_inputs_jax(X)
     y_arr = as_f64(y)
     p_arr = as_f64(pv)
     s_arr = as_f64(splits_padded)
@@ -444,7 +486,9 @@ def predict_components_masked_jax(
     idx0 = jnp.argmax(mask_bool)
     has_valid = jnp.any(mask_bool)
     raw_t0 = X_arr[idx0, 0]
-    t_ref = jnp.where(has_valid & jnp.isfinite(raw_t0), raw_t0, jnp.asarray(0.0, dtype=jnp.float64))
+    t_ref = jnp.where(
+        has_valid & jnp.isfinite(raw_t0), raw_t0, jnp.asarray(0.0, dtype=jnp.float64)
+    )
 
     X_clean_raw = jnp.where(mask_bool[:, None], X_arr, 0.0)
     X_rel, splits_rel = _shift_time_origin(X_clean_raw, s_arr, t_ref)
@@ -458,10 +502,12 @@ def predict_components_masked_jax(
     diag_aug = m * diag + (1.0 - m)
     gp = tinygp.GaussianProcess(_BlockMaskedKernel(k_tot), X_aug, diag=diag_aug)
 
-    alpha_aug = gp.solver.solve_triangular(gp.solver.solve_triangular(y_clean), transpose=True)
+    alpha_aug = gp.solver.solve_triangular(
+        gp.solver.solve_triangular(y_clean), transpose=True
+    )
     alpha_masked = jnp.where(mask_bool, alpha_aug, 0.0)
 
-    X_q_raw = X_arr if X_test is None else as_f64(X_test)
+    X_q_raw = X_arr if X_test is None else canonicalize_inputs_jax(X_test)
     valid_q = jnp.all(jnp.isfinite(X_q_raw), axis=1)
     X_q_safe_raw = jnp.where(valid_q[:, None], X_q_raw, 0.0)
     X_q_rel = X_q_safe_raw.at[:, 0].add(-t_ref)
@@ -635,9 +681,9 @@ class SplitGP:
 
     def set_inputs(self, x=None) -> None:
         if x is not None:
-            x_arr = np.asarray(as_f64(x), dtype=np.float64)
+            x_arr = _canonicalize_inputs_np(x)
             if self._x is None or not np.array_equal(x_arr, self._x):
-                self._x = x_arr.copy()
+                self._x = x_arr
                 self.set_dirty(True)
 
     def compute(self, x=None, pv=None, jitter: float = 0.0) -> None:
@@ -721,8 +767,8 @@ class SplitGP:
         add_wn: bool = False,
     ):
         self.set_pv(pv)
-        X1 = as_f64(x1)
-        X2 = X1 if x2 is None else as_f64(x2)
+        X1 = canonicalize_inputs_jax(x1)
+        X2 = X1 if x2 is None else canonicalize_inputs_jax(x2)
 
         if self._x is not None and not self.is_dirty:
             t_ref_jax = self._t_ref_jax
@@ -776,7 +822,7 @@ class SplitGP:
         assert self._splits_rel is not None
         assert self._pv_jax is not None
 
-        X_q = as_f64(x)
+        X_q = canonicalize_inputs_jax(x)
         mu_j, _, _, Ks, kss_diag, valid_q = _jit_cross_and_components(
             self._pv_jax,
             self._X_rel,
@@ -790,7 +836,9 @@ class SplitGP:
         if mean_only:
             return mu
 
-        err_j = _jit_pred_err_from_tril(self._gp.solver.scale_tril, Ks, kss_diag, valid_q)
+        err_j = _jit_pred_err_from_tril(
+            self._gp.solver.scale_tril, Ks, kss_diag, valid_q
+        )
         return mu, np.asarray(err_j, dtype=np.float64)
 
     def predict_components(self, *args, **kwargs) -> tuple[np.ndarray, np.ndarray]:
@@ -819,16 +867,14 @@ class SplitGP:
         elif "x" in kwargs and len(args) == 0:
             x_query = kwargs["x"]
         else:
-            raise TypeError(
-                "predict_components expects (x) or (pv, y, x1, x2=None)."
-            )
+            raise TypeError("predict_components expects (x) or (pv, y, x1, x2=None).")
 
         alpha = self._compute_alpha(allow_jitter_fallback=True)
         assert self._X_rel is not None
         assert self._splits_rel is not None
         assert self._pv_jax is not None
 
-        X_q = as_f64(x_query)
+        X_q = canonicalize_inputs_jax(x_query)
         _, mt_j, mp_j, _, _, _ = _jit_cross_and_components(
             self._pv_jax,
             self._X_rel,

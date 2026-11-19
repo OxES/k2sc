@@ -128,6 +128,44 @@ def test_lognorm_prior_fixed_algebra_and_double_where_grads():
         assert not np.isnan(h_val) and h_val == 0.0
 
 
+def test_lognorm_prior_closed_positive_lower_bound_and_spec_parity():
+    """Positive lower bound vmin > 0 must be closed (included); only x <= 0 is singular."""
+    mu, sigma = 0.25, 1.25
+    p_pos = LogNormPrior(mu=mu, sigma=sigma, lims=[0.1, 2.0])
+
+    val_lo = float(p_pos(0.1))
+    val_hi = float(p_pos(2.0))
+    expected_lo = float(stats.lognorm.logpdf(0.1, s=sigma, scale=np.exp(mu)))
+    expected_hi = float(stats.lognorm.logpdf(2.0, s=sigma, scale=np.exp(mu)))
+    assert np.isfinite(val_lo)
+    assert np.isfinite(val_hi)
+    npt.assert_allclose(val_lo, expected_lo, rtol=1e-14, atol=1e-14)
+    npt.assert_allclose(val_hi, expected_hi, rtol=1e-14, atol=1e-14)
+
+    for x_oob in (-1.0, 0.0, 0.099999, 2.000001):
+        assert float(p_pos(x_oob)) == -np.inf
+
+    spec = build_prior_spec(
+        [UniformPrior(-6.0, 1.0), p_pos, NormalPrior(17.0, 8.0, lims=[0.0, 70.0])]
+    )
+    pv_boundary = jnp.array([-6.0, 0.1, 0.0], dtype=jnp.float64)
+    val_spec, grad_spec = jax.jit(jax.value_and_grad(eval_ln_prior_jax))(
+        pv_boundary, spec
+    )
+    expected_sum = (
+        float(UniformPrior(-6.0, 1.0)(-6.0))
+        + expected_lo
+        + float(NormalPrior(17.0, 8.0, lims=[0.0, 70.0])(0.0))
+    )
+    npt.assert_allclose(float(val_spec), expected_sum, rtol=1e-14, atol=1e-14)
+    assert np.all(np.isfinite(np.asarray(grad_spec)))
+
+    pv_below = jnp.array([-6.0, 0.099, 0.0], dtype=jnp.float64)
+    val_bad, grad_bad = jax.jit(jax.value_and_grad(eval_ln_prior_jax))(pv_below, spec)
+    assert np.isneginf(float(val_bad))
+    npt.assert_array_equal(np.asarray(grad_bad), np.zeros(3))
+
+
 def test_prior_spec_and_eval_ln_prior_jax_across_all_kernels():
     jit_ln_prior = jax.jit(eval_ln_prior_jax)
     vmap_val_grad = jax.jit(
@@ -142,7 +180,9 @@ def test_prior_spec_and_eval_ln_prior_jax_across_all_kernels():
         ref_sum = sum(float(pr(v)) for pr, v in zip(k.priors, pv_valid))
         got = float(jit_ln_prior(jnp.asarray(pv_valid), spec))
         npt.assert_allclose(got, ref_sum, rtol=1e-14, atol=1e-14)
-        npt.assert_allclose(float(k.ln_prior(pv_valid)), ref_sum, rtol=1e-14, atol=1e-14)
+        npt.assert_allclose(
+            float(k.ln_prior(pv_valid)), ref_sum, rtol=1e-14, atol=1e-14
+        )
 
         # Batch with valid, negative LogNorm slot, below lower bound, and NaN
         pv_neg_lognorm = pv_valid.copy()
@@ -155,7 +195,9 @@ def test_prior_spec_and_eval_ln_prior_jax_across_all_kernels():
         pv_with_nan[2] = np.nan
 
         batch = jnp.asarray(
-            np.stack([pv_valid, pv_neg_lognorm, pv_zero_lognorm, pv_above_upper, pv_with_nan]),
+            np.stack(
+                [pv_valid, pv_neg_lognorm, pv_zero_lognorm, pv_above_upper, pv_with_nan]
+            ),
             dtype=jnp.float64,
         )
         vals, grads = vmap_val_grad(batch, spec)

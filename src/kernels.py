@@ -1,19 +1,19 @@
-""" Module defining Gaussian process kernels for k2sc.
+"""Module defining Gaussian process kernels for k2sc.
 
-    Copyright (C) 2016  Suzanne Aigrain
+Copyright (C) 2016  Suzanne Aigrain
 
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
 
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
 
-    You should have received a copy of the GNU General Public License
-    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 """
 
 from __future__ import annotations
@@ -131,6 +131,44 @@ def _safe_abs(diff: jax.Array) -> jax.Array:
     return jnp.where(is_zero, jnp.zeros_like(diff), jnp.abs(safe_diff))
 
 
+def _safe_sqrt_zero(val: jax.Array) -> jax.Array:
+    """Autodiff-safe sqrt(val) returning 0 with finite 0 derivative at val == 0."""
+    is_zero = val == 0.0
+    safe_val = jnp.where(is_zero, jnp.ones_like(val), val)
+    return jnp.where(is_zero, jnp.zeros_like(val), jnp.sqrt(safe_val))
+
+
+def canonicalize_inputs_jax(X) -> jax.Array:
+    """Validate and canonicalize (N, 2) [t, x] or (N, 3) [t, x, y] inputs to (N, 3) float64."""
+    X_arr = as_f64(X)
+    if X_arr.ndim != 2 or X_arr.shape[1] not in (2, 3):
+        raise ValueError(
+            f"Expected 2D input coordinates with shape (N, 2) or (N, 3), got {X_arr.shape}."
+        )
+    if X_arr.shape[1] == 2:
+        zeros_y = jnp.zeros((X_arr.shape[0], 1), dtype=jnp.float64)
+        return jnp.concatenate([X_arr, zeros_y], axis=1)
+    return X_arr
+
+
+def _canonicalize_point_jax(X) -> jax.Array:
+    """Validate and canonicalize a 1D coordinate point of length 2 or 3 to length 3."""
+    X_arr = as_f64(X)
+    if X_arr.ndim != 1 or X_arr.shape[0] not in (2, 3):
+        raise ValueError(
+            f"Expected 1D coordinate point of length 2 or 3, got shape {X_arr.shape}."
+        )
+    if X_arr.shape[0] == 2:
+        return jnp.concatenate([X_arr, jnp.zeros((1,), dtype=jnp.float64)], axis=0)
+    return X_arr
+
+
+def _safe_inv(val: float) -> float:
+    """Return 1.0 / val for nonzero val and +inf for val == 0 without RuntimeWarning."""
+    v = float(val)
+    return float(np.inf) if v == 0.0 else 1.0 / v
+
+
 class SafeL1Distance(Distance):
     """Zero-bias, autodiff-safe L1 distance for 0-D scalar and 1-D vector coordinates."""
 
@@ -230,7 +268,9 @@ def _eval_spatial_from_diffs(
     if is_ep:
         dx = _safe_abs(diff_x)
         dy = _safe_abs(diff_y)
-        val = amp * jnp.exp(-jnp.sqrt(p[x_idx]) * dx - jnp.sqrt(p[y_idx]) * dy)
+        sqrt_px = _safe_sqrt_zero(p[x_idx])
+        sqrt_py = _safe_sqrt_zero(p[y_idx])
+        val = amp * jnp.exp(-sqrt_px * dx - sqrt_py * dy)
     else:
         val = amp * jnp.exp(
             -0.5 * (p[x_idx] * jnp.square(diff_x) + p[y_idx] * jnp.square(diff_y))
@@ -249,18 +289,22 @@ class K2SCTimeKernel(tinygp.kernels.Kernel):
         self.kernel_id = _normalize_kernel_id(kernel_id)
 
     def evaluate(self, X1: jax.Array, X2: jax.Array) -> jax.Array:
-        return _eval_time_from_diff(self.pv, X1[0] - X2[0], self.kernel_id)
+        x1 = _canonicalize_point_jax(X1)
+        x2 = _canonicalize_point_jax(X2)
+        return _eval_time_from_diff(self.pv, x1[0] - x2[0], self.kernel_id)
 
     def evaluate_diag(self, X: jax.Array) -> jax.Array:
-        del X
+        _ = _canonicalize_point_jax(X)
         return _eval_time_diag_scalar(self.pv, self.kernel_id)
 
     def __call__(self, X1: jax.Array, X2: jax.Array | None = None) -> jax.Array:
+        X1_c = canonicalize_inputs_jax(X1)
         if X2 is None:
             return jnp.broadcast_to(
-                _eval_time_diag_scalar(self.pv, self.kernel_id), (X1.shape[0],)
+                _eval_time_diag_scalar(self.pv, self.kernel_id), (X1_c.shape[0],)
             )
-        diff_t = X1[:, 0:1] - X2[None, :, 0]
+        X2_c = canonicalize_inputs_jax(X2)
+        diff_t = X1_c[:, 0:1] - X2_c[None, :, 0]
         return _eval_time_from_diff(self.pv, diff_t, self.kernel_id)
 
     def __add__(self, other: tinygp.kernels.Kernel | Any) -> tinygp.kernels.Kernel:
@@ -282,30 +326,34 @@ class K2SCSpatialKernel(tinygp.kernels.Kernel):
         self.kernel_id = _normalize_kernel_id(kernel_id)
 
     def evaluate(self, X1: jax.Array, X2: jax.Array) -> jax.Array:
-        seg1 = jnp.sum(X1[0] > self.splits_padded)
-        seg2 = jnp.sum(X2[0] > self.splits_padded)
+        x1 = _canonicalize_point_jax(X1)
+        x2 = _canonicalize_point_jax(X2)
+        seg1 = jnp.sum(x1[0] > self.splits_padded)
+        seg2 = jnp.sum(x2[0] > self.splits_padded)
         return _eval_spatial_from_diffs(
             self.pv,
-            X1[1] - X2[1],
-            X1[2] - X2[2],
+            x1[1] - x2[1],
+            x1[2] - x2[2],
             seg1 == seg2,
             self.kernel_id,
         )
 
     def evaluate_diag(self, X: jax.Array) -> jax.Array:
-        del X
+        _ = _canonicalize_point_jax(X)
         return _eval_spatial_diag_scalar(self.pv, self.kernel_id)
 
     def __call__(self, X1: jax.Array, X2: jax.Array | None = None) -> jax.Array:
+        X1_c = canonicalize_inputs_jax(X1)
         if X2 is None:
             return jnp.broadcast_to(
-                _eval_spatial_diag_scalar(self.pv, self.kernel_id), (X1.shape[0],)
+                _eval_spatial_diag_scalar(self.pv, self.kernel_id), (X1_c.shape[0],)
             )
-        seg1 = jnp.sum(X1[:, 0:1] > self.splits_padded[None, :], axis=-1)
-        seg2 = jnp.sum(X2[:, 0:1] > self.splits_padded[None, :], axis=-1)
+        X2_c = canonicalize_inputs_jax(X2)
+        seg1 = jnp.sum(X1_c[:, 0:1] > self.splits_padded[None, :], axis=-1)
+        seg2 = jnp.sum(X2_c[:, 0:1] > self.splits_padded[None, :], axis=-1)
         same_seg = seg1[:, None] == seg2[None, :]
-        diff_x = X1[:, 1:2] - X2[None, :, 1]
-        diff_y = X1[:, 2:3] - X2[None, :, 2]
+        diff_x = X1_c[:, 1:2] - X2_c[None, :, 1]
+        diff_y = X1_c[:, 2:3] - X2_c[None, :, 2]
         return _eval_spatial_from_diffs(
             self.pv, diff_x, diff_y, same_seg, self.kernel_id
         )
@@ -329,40 +377,42 @@ class K2SCKernel(tinygp.kernels.Kernel):
         self.kernel_id = _normalize_kernel_id(kernel_id)
 
     def evaluate(self, X1: jax.Array, X2: jax.Array) -> jax.Array:
-        k1 = _eval_time_from_diff(self.pv, X1[0] - X2[0], self.kernel_id)
-        seg1 = jnp.sum(X1[0] > self.splits_padded)
-        seg2 = jnp.sum(X2[0] > self.splits_padded)
+        x1 = _canonicalize_point_jax(X1)
+        x2 = _canonicalize_point_jax(X2)
+        k1 = _eval_time_from_diff(self.pv, x1[0] - x2[0], self.kernel_id)
+        seg1 = jnp.sum(x1[0] > self.splits_padded)
+        seg2 = jnp.sum(x2[0] > self.splits_padded)
         k2 = _eval_spatial_from_diffs(
             self.pv,
-            X1[1] - X2[1],
-            X1[2] - X2[2],
+            x1[1] - x2[1],
+            x1[2] - x2[2],
             seg1 == seg2,
             self.kernel_id,
         )
         return k1 + k2
 
     def evaluate_diag(self, X: jax.Array) -> jax.Array:
-        del X
+        _ = _canonicalize_point_jax(X)
         return _eval_time_diag_scalar(
             self.pv, self.kernel_id
         ) + _eval_spatial_diag_scalar(self.pv, self.kernel_id)
 
     def __call__(self, X1: jax.Array, X2: jax.Array | None = None) -> jax.Array:
+        X1_c = canonicalize_inputs_jax(X1)
         if X2 is None:
             diag_val = _eval_time_diag_scalar(
                 self.pv, self.kernel_id
             ) + _eval_spatial_diag_scalar(self.pv, self.kernel_id)
-            return jnp.broadcast_to(diag_val, (X1.shape[0],))
-        diff_t = X1[:, 0:1] - X2[None, :, 0]
+            return jnp.broadcast_to(diag_val, (X1_c.shape[0],))
+        X2_c = canonicalize_inputs_jax(X2)
+        diff_t = X1_c[:, 0:1] - X2_c[None, :, 0]
         k1 = _eval_time_from_diff(self.pv, diff_t, self.kernel_id)
-        seg1 = jnp.sum(X1[:, 0:1] > self.splits_padded[None, :], axis=-1)
-        seg2 = jnp.sum(X2[:, 0:1] > self.splits_padded[None, :], axis=-1)
+        seg1 = jnp.sum(X1_c[:, 0:1] > self.splits_padded[None, :], axis=-1)
+        seg2 = jnp.sum(X2_c[:, 0:1] > self.splits_padded[None, :], axis=-1)
         same_seg = seg1[:, None] == seg2[None, :]
-        diff_x = X1[:, 1:2] - X2[None, :, 1]
-        diff_y = X1[:, 2:3] - X2[None, :, 2]
-        k2 = _eval_spatial_from_diffs(
-            self.pv, diff_x, diff_y, same_seg, self.kernel_id
-        )
+        diff_x = X1_c[:, 1:2] - X2_c[None, :, 1]
+        diff_y = X1_c[:, 2:3] - X2_c[None, :, 2]
+        k2 = _eval_spatial_from_diffs(self.pv, diff_x, diff_y, same_seg, self.kernel_id)
         return k1 + k2
 
 
@@ -396,7 +446,9 @@ class DtKernel:
 
     def __init__(self, p0=None, **kwargs):
         base_pv = np.array(self.pv0, dtype=np.float64, copy=True)
-        self._pv = np.array(p0, dtype=np.float64, copy=True) if p0 is not None else base_pv
+        self._pv = (
+            np.array(p0, dtype=np.float64, copy=True) if p0 is not None else base_pv
+        )
         self.lims = np.transpose([p.lims for p in self.priors]).astype(np.float64)
         self.prior_spec = build_prior_spec(self.priors)
 
@@ -468,10 +520,10 @@ class BasicKernel(DtKernel):
     def map_pv(self, pv) -> np.ndarray:
         pp = np.array(pv, dtype=np.float64, copy=True)
         pp[0] = 10.0 ** pv[0]
-        pp[1] = 1.0 / pv[1]
+        pp[1] = _safe_inv(pv[1])
         pp[2] = 10.0 ** pv[2]
-        pp[3] = 1.0 / pv[3]
-        pp[4] = 1.0 / pv[4]
+        pp[3] = _safe_inv(pv[3])
+        pp[4] = _safe_inv(pv[4])
         pp[5] = 10.0 ** pv[5]
         self._pm = pp
         return self._pm
@@ -544,13 +596,13 @@ class PeriodicKernel(DtKernel):
     def map_pv(self, pv) -> np.ndarray:
         pp = np.array(pv, dtype=np.float64, copy=True)
         pp[0] = 10.0 ** pv[0]
-        pp[1] = 1.0 / pv[1]
+        pp[1] = _safe_inv(pv[1])
         pp[2] = pv[2]
         pp[3] = 10.0 ** pv[3]
-        pp[4] = 1.0 / pv[4]
+        pp[4] = _safe_inv(pv[4])
         pp[5] = 10.0 ** pv[5]
-        pp[6] = 1.0 / pv[6]
-        pp[7] = 1.0 / pv[7]
+        pp[6] = _safe_inv(pv[6])
+        pp[7] = _safe_inv(pv[7])
         pp[8] = 10.0 ** pv[8]
         self._pm = pp
         return self._pm
@@ -618,12 +670,12 @@ class QuasiPeriodicKernel(BasicKernel):
     def map_pv(self, pv) -> np.ndarray:
         pp = np.array(pv, dtype=np.float64, copy=True)
         pp[0] = 10.0 ** pv[0]
-        pp[1] = 1.0 / pv[1]
+        pp[1] = _safe_inv(pv[1])
         pp[2] = pv[2]
-        pp[3] = 1.0 / pv[3]
+        pp[3] = _safe_inv(pv[3])
         pp[4] = 10.0 ** pv[4]
-        pp[5] = 1.0 / pv[5]
-        pp[6] = 1.0 / pv[6]
+        pp[5] = _safe_inv(pv[5])
+        pp[6] = _safe_inv(pv[6])
         pp[7] = 10.0 ** pv[7]
         self._pm = pp
         return self._pm
