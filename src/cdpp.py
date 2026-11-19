@@ -333,17 +333,19 @@ def cdpp(
 
     t = time[m]
     f_raw = flux[m]
+
+    # Sort by timestamp before computing f_mean so summation order, diff,
+    # savgol_filter, and block_mean are strictly permutation-invariant.
+    if np.any(t[1:] < t[:-1]):
+        order = np.argsort(t, kind="mergesort")
+        t = t[order]
+        f_raw = f_raw[order]
+
     f_mean = float(f_raw.mean())
     f_scale = float(np.max(np.abs(f_raw)))
     if not np.isfinite(f_mean) or f_scale == 0.0 or abs(f_mean) <= 1e-12 * f_scale:
         return float("nan")
     f = f_raw / f_mean
-
-    # Sort by timestamp when unsorted so diff, savgol_filter, and block_mean are valid
-    if np.any(t[1:] < t[:-1]):
-        order = np.argsort(t, kind="mergesort")
-        t = t[order]
-        f = f[order]
 
     # Auto-compute bl_sz from transit duration if supplied
     if transit_duration_hours is not None:
