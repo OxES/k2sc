@@ -76,9 +76,7 @@ class TestCoreConstantsAndSplits:
 
     def test_default_k2_splits_campaigns_c0_to_c19(self) -> None:
         assert default_splits is DEFAULT_K2_SPLITS
-        required_keys = (
-            set(range(20)) | {91, 92, 101, 102, 111, 112}
-        )
+        required_keys = set(range(20)) | {91, 92, 101, 102, 111, 112}
         assert required_keys.issubset(DEFAULT_K2_SPLITS.keys())
         # Issue 10: Campaign 8 splits
         assert DEFAULT_K2_SPLITS[8] == [2579.0, 2598.5]
@@ -156,6 +154,34 @@ class TestAMCReaderAndPrimaryHeaderNone:
             assert (tbl["mflags_1"][5] & M_NOTFINITE) != 0
             assert (tbl["mflags_2"][5] & M_NOTFINITE) != 0
 
+        # Multi-aperture K2SCFile loading (aperture=1 and aperture=2) without KeyError: 'flux'
+        kf1 = K2SCFile(str(out_fits), aperture=1)
+        kf2 = K2SCFile(str(out_fits), aperture=2)
+        assert kf1.aperture == 1
+        assert kf2.aperture == 2
+        assert not kf1.is_hlsp
+        assert np.allclose(kf1.original_flux, 5000.0)
+        assert np.allclose(kf2.original_flux, 6200.0)
+        with pytest.raises(KeyError, match="Aperture 3"):
+            K2SCFile(str(out_fits), aperture=3)
+
+    def test_amc_reader_txt_extension_and_single_row(self, tmp_path: Path) -> None:
+        """AMCReader must accept .txt files and handle 1-row files safely (ndmin=2)."""
+        amc_txt = tmp_path / "EPIC_203794605.txt"
+        amc_txt.write_text(
+            "dates cadences flux1 err1 xpos ypos quality\n"
+            "2301.25 1001 5100.0 1.2 0.15 -0.08 0\n",
+            encoding="utf-8",
+        )
+        assert AMCReader.can_read(str(amc_txt)) is True
+        assert select_reader(str(amc_txt)) is AMCReader
+        ds = AMCReader.read(str(amc_txt), campaign=5)
+        assert ds.epic == 203794605
+        assert ds.nsets == 1
+        assert ds.npoints == 1
+        assert np.isclose(ds.time[0], 2301.25)
+        assert np.isclose(ds.fluxes[0, 0], 5100.0)
+
 
 class TestMASTReaderAndSPLOXReader:
     def test_mast_reader_on_real_c05_fits(self) -> None:
@@ -227,6 +253,171 @@ class TestMASTReaderAndSPLOXReader:
         assert ds.nsets == napt
         assert ds.npoints == nexp - 1
         assert ds.quality.dtype == np.int32
+
+    def test_mast_reader_renamed_file_header_epic_and_tess_generic_fallbacks(
+        self, tmp_path: Path
+    ) -> None:
+        """MASTReader resolves EPIC/TICID from header first and supports TESS/generic FITS."""
+        n = 30
+        t = np.linspace(1325.0, 1350.0, n, dtype=np.float64)
+        cad = np.arange(1, n + 1, dtype=np.int32)
+        flux = 10000.0 + 20.0 * np.sin(t)
+        err = np.full(n, 2.0, dtype=np.float64)
+        qual = np.zeros(n, dtype=np.int32)
+        qual[4] = 16
+        mom_x = np.linspace(100.0, 100.5, n)
+        mom_y = np.linspace(200.0, 199.5, n)
+
+        # 1. Renamed FITS file (issue 23): '203794605.fits' with KEPLERID in primary header
+        renamed = tmp_path / "203794605.fits"
+        phead = pf.Header()
+        phead["KEPLERID"] = 203794605
+        phead["CAMPAIGN"] = 2
+        cols_k2 = [
+            pf.Column(name="TIME", format="D", array=t),
+            pf.Column(name="CADENCENO", format="J", array=cad),
+            pf.Column(name="SAP_FLUX", format="D", array=flux),
+            pf.Column(name="SAP_FLUX_ERR", format="D", array=err),
+            pf.Column(name="PDCSAP_FLUX", format="D", array=flux),
+            pf.Column(name="PDCSAP_FLUX_ERR", format="D", array=err),
+            pf.Column(name="SAP_QUALITY", format="J", array=qual),
+            pf.Column(name="POS_CORR1", format="D", array=np.linspace(-0.2, 0.2, n)),
+            pf.Column(name="POS_CORR2", format="D", array=np.linspace(0.2, -0.2, n)),
+        ]
+        pf.HDUList(
+            [pf.PrimaryHDU(header=phead), pf.BinTableHDU.from_columns(cols_k2)]
+        ).writeto(str(renamed), overwrite=True)
+        assert MASTReader.can_read(str(renamed)) is True
+        ds_ren = MASTReader.read(str(renamed))
+        assert ds_ren.epic == 203794605
+        assert ds_ren.campaign == 2
+
+        # 1b. Renamed FITS with NO header ID falls back to filename digits (no epic=0 collision)
+        renamed_nohdr = tmp_path / "203794605_custom.fits"
+        pf.HDUList([pf.PrimaryHDU(), pf.BinTableHDU.from_columns(cols_k2)]).writeto(
+            str(renamed_nohdr), overwrite=True
+        )
+        assert MASTReader.read(str(renamed_nohdr)).epic == 203794605
+
+        # 2. TESS SPOC FITS: TICID, QUALITY (not SAP_QUALITY), POS_CORR sparse (<15 finite) -> MOM_CENTR
+        tess_path = tmp_path / "tess_target.fits"
+        phead_t = pf.Header()
+        phead_t["TICID"] = 261136679
+        pos_sparse = np.full(n, np.nan, dtype=np.float64)
+        pos_sparse[:5] = 0.01
+        cols_tess = [
+            pf.Column(name="TIME", format="D", array=t),
+            pf.Column(name="CADENCENO", format="J", array=cad),
+            pf.Column(name="PDCSAP_FLUX", format="D", array=flux),
+            pf.Column(name="PDCSAP_FLUX_ERR", format="D", array=err),
+            pf.Column(name="QUALITY", format="J", array=qual),
+            pf.Column(name="POS_CORR1", format="D", array=pos_sparse),
+            pf.Column(name="POS_CORR2", format="D", array=pos_sparse),
+            pf.Column(name="MOM_CENTR1", format="D", array=mom_x),
+            pf.Column(name="MOM_CENTR2", format="D", array=mom_y),
+        ]
+        pf.HDUList(
+            [pf.PrimaryHDU(header=phead_t), pf.BinTableHDU.from_columns(cols_tess)]
+        ).writeto(str(tess_path), overwrite=True)
+        assert MASTReader.can_read(str(tess_path)) is True
+        assert select_reader(str(tess_path)) is MASTReader
+        ds_tess = MASTReader.read(str(tess_path))
+        assert ds_tess.epic == 261136679
+        assert ds_tess.npoints == n
+        assert np.allclose(ds_tess.x, mom_x)
+        assert np.allclose(ds_tess.y, mom_y)
+        assert ds_tess.quality[4] == 16
+
+        # 3. Generic light-curve FITS: single FLUX/FLUX_ERR, no quality/cadence, CENTROID_COL/ROW
+        gen_path = tmp_path / "generic_star.fits"
+        phead_g = pf.Header()
+        phead_g["OBJECT"] = "EPIC 201234567"
+        cols_gen = [
+            pf.Column(name="TIME", format="D", array=t),
+            pf.Column(name="FLUX", format="D", array=flux),
+            pf.Column(name="FLUX_ERR", format="D", array=err),
+            pf.Column(name="CENTROID_COL", format="D", array=mom_x),
+            pf.Column(name="CENTROID_ROW", format="D", array=mom_y),
+        ]
+        pf.HDUList(
+            [pf.PrimaryHDU(header=phead_g), pf.BinTableHDU.from_columns(cols_gen)]
+        ).writeto(str(gen_path), overwrite=True)
+        assert MASTReader.can_read(str(gen_path)) is True
+        ds_gen = MASTReader.read(str(gen_path))
+        assert ds_gen.epic == 201234567
+        assert ds_gen.npoints == n
+        assert np.all(ds_gen.quality == 0)
+        assert np.allclose(ds_gen.x, mom_x)
+        assert np.allclose(ds_gen.y, mom_y)
+
+    def test_mast_header_preservation_and_zero_verify_warnings(
+        self, tmp_path: Path
+    ) -> None:
+        """MAST primary and table header keywords survive FITSWriter.write cleanly (issue 7)."""
+        from astropy.io.fits.verify import VerifyWarning
+        from k2sc.kernels import PeriodicKernel, QuasiPeriodicKernel
+
+        fits_files = sorted(_DATA_OP_DIR.glob("ktwo*-c05_llc.fits"))
+        assert len(fits_files) >= 1
+        src_fits = fits_files[0]
+
+        with pf.open(str(src_fits)) as src_hdul:
+            expected_primary = {
+                k: src_hdul[0].header[k]
+                for k in (
+                    "KEPLERID",
+                    "CAMPAIGN",
+                    "RA_OBJ",
+                    "DEC_OBJ",
+                    "CHANNEL",
+                    "MODULE",
+                    "OUTPUT",
+                    "TELESCOP",
+                    "INSTRUME",
+                )
+                if k in src_hdul[0].header
+            }
+            expected_table = {
+                k: src_hdul[1].header[k]
+                for k in ("KEPLERID", "TELESCOP", "INSTRUME")
+                if k in src_hdul[1].header
+            }
+
+        ds = MASTReader.read(str(src_fits), type="pdc")
+
+        for kernel_cls in (BasicKernel, QuasiPeriodicKernel, PeriodicKernel):
+            kern = kernel_cls()
+            pv = kern.pv0.copy() + 0.123456789
+            det = _DummyDetrender(kernel=kern, tr_pv=pv)
+            dtres = [
+                _DummyResult(
+                    detrender=det,
+                    tr_time=np.full(ds.npoints, 1000.0),
+                    tr_position=np.full(ds.npoints, 1000.0),
+                    cdpp_r=120.0,
+                    cdpp_t=45.0,
+                    cdpp_c=32.0,
+                    warn=False,
+                )
+            ]
+            out_fits = tmp_path / f"preserved_{kernel_cls.__name__}.fits"
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                FITSWriter.write(str(out_fits), [2344.0], ds, dtres)
+            verify_warns = [w for w in caught if issubclass(w.category, VerifyWarning)]
+            assert verify_warns == [], (
+                f"Unexpected VerifyWarning for {kernel_cls.__name__}: {verify_warns}"
+            )
+
+            with pf.open(str(out_fits)) as out_hdul:
+                for k, v in expected_primary.items():
+                    assert out_hdul[0].header[k] == v, f"Primary header {k} mismatch"
+                for k, v in expected_table.items():
+                    assert out_hdul[1].header[k] == v, f"Table header {k} mismatch"
+                assert (
+                    out_hdul[0].header["ORIGIN"] == "SPLOX: Stars and Planets at Oxford"
+                )
+                assert out_hdul[1].header["EXTNAME"] == "K2SC"
 
 
 class TestFITSWriterUnpackAndK2SCFileRoundTrip:
@@ -337,6 +528,65 @@ class TestFITSWriterUnpackAndK2SCFileRoundTrip:
         kfile_clean.set_remove_outliers(False)
         kfile_clean.set_remove_nans(False)
         assert kfile_clean.time.size == n_full
+
+    def test_k2scfile_hlsp_no_double_subtraction(self, tmp_path: Path) -> None:
+        """K2SCFile must detect k2mastify HLSP extensions (PDC/SAP) and never double-subtract."""
+        n = 50
+        t = np.linspace(2300.0, 2320.0, n, dtype=np.float64)
+        tr_pos = 1000.0 + 40.0 * np.sin(np.linspace(0.0, 4.0 * np.pi, n))
+        tr_time = 1000.0 + 25.0 * np.cos(np.linspace(0.0, 2.0 * np.pi, n))
+        resid_true = 10000.0 + np.linspace(-2.0, 2.0, n)
+        # Simulate k2mastify formula: flux_hlsp = raw - (trposi - mean) - (trtime - mean)
+        raw_true = (
+            resid_true + (tr_pos - np.nanmean(tr_pos)) + (tr_time - np.nanmean(tr_time))
+        )
+        flux_hlsp = (
+            raw_true - tr_pos + np.nanmean(tr_pos) - tr_time + np.nanmean(tr_time)
+        )
+        mflags = np.zeros(n, dtype=np.uint8)
+        mflags[5] = M_OUTLIER_U
+
+        def _make_hlsp_hdu(extname: str, offset: float) -> pf.BinTableHDU:
+            cols = [
+                pf.Column(name="time", format="D", array=t),
+                pf.Column(name="flux", format="D", array=flux_hlsp + offset),
+                pf.Column(name="trposi", format="D", array=tr_pos),
+                pf.Column(name="trtime", format="D", array=tr_time),
+                pf.Column(name="mflags", format="B", array=mflags),
+            ]
+            hdu = pf.BinTableHDU.from_columns(cols)
+            hdu.header["EXTNAME"] = extname
+            return hdu
+
+        hlsp_path = tmp_path / "hlsp_k2sc_k2_llc_211436265-c05_kepler_v1_lc.fits"
+        pf.HDUList(
+            [pf.PrimaryHDU(), _make_hlsp_hdu("PDC", 0.0), _make_hlsp_hdu("SAP", 50.0)]
+        ).writeto(str(hlsp_path), overwrite=True)
+
+        kf_pdc = K2SCFile(str(hlsp_path), ext=1)
+        assert kf_pdc.is_hlsp is True
+        np.testing.assert_allclose(
+            kf_pdc.residual_flux, flux_hlsp, rtol=1e-12, atol=1e-12
+        )
+        np.testing.assert_allclose(
+            kf_pdc.original_flux, raw_true, rtol=1e-12, atol=1e-12
+        )
+        np.testing.assert_allclose(
+            kf_pdc.detrended_flux,
+            raw_true - (tr_pos - np.nanmean(tr_pos)),
+            rtol=1e-12,
+            atol=1e-12,
+        )
+
+        # Also check SAP extension (ext="SAP" / ext=2)
+        kf_sap = K2SCFile(str(hlsp_path), ext="SAP")
+        assert kf_sap.is_hlsp is True
+        np.testing.assert_allclose(
+            kf_sap.residual_flux, flux_hlsp + 50.0, rtol=1e-12, atol=1e-12
+        )
+        np.testing.assert_allclose(
+            kf_sap.original_flux, raw_true + 50.0, rtol=1e-12, atol=1e-12
+        )
 
 
 class TestDtDataAndTrainingSet:

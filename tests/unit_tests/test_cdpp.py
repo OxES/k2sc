@@ -26,6 +26,7 @@ from k2sc.cdpp import block_mean, cdpp, savgol_filter
 # Reference implementation using np.polyfit
 # ---------------------------------------------------------------------------
 
+
 def _ref_savgol(t, f, wd=2.0, order=2):
     """Pure-NumPy reference matching legacy cdpp.py:6-17."""
     n = len(t)
@@ -72,6 +73,7 @@ def high_bjd_lc():
 # ---------------------------------------------------------------------------
 # savgol_filter tests
 # ---------------------------------------------------------------------------
+
 
 class TestSavgolFilter:
     def test_parity_vs_polyfit_small(self):
@@ -141,6 +143,7 @@ class TestSavgolFilter:
 # block_mean tests
 # ---------------------------------------------------------------------------
 
+
 class TestBlockMean:
     def test_integer_block_size_min(self):
         """block_size // 2 + 1 must give integer 7, not float 7.5."""
@@ -172,6 +175,7 @@ class TestBlockMean:
 # ---------------------------------------------------------------------------
 # cdpp tests
 # ---------------------------------------------------------------------------
+
 
 class TestCdpp:
     def test_white_noise_scaling(self):
@@ -249,3 +253,60 @@ class TestCdpp:
         f = 1.0 + 1e-4 * rng.standard_normal(len(t))
         result = cdpp(t, f)
         assert np.isfinite(result)
+
+    def test_unsorted_time_matches_sorted(self):
+        """Unsorted timestamps must produce identical CDPP and Savitzky-Golay output."""
+        rng = np.random.default_rng(321)
+        t = np.arange(200, dtype=np.float64) * 0.0204
+        f = 1.0 + 2e-4 * rng.standard_normal(200)
+        perm = rng.permutation(200)
+
+        cdpp_sorted = cdpp(t, f)
+        cdpp_unsorted = cdpp(t[perm], f[perm])
+        npt.assert_allclose(cdpp_unsorted, cdpp_sorted, rtol=1e-12, atol=1e-12)
+
+        sm_sorted = savgol_filter(t, f)
+        sm_unsorted = savgol_filter(t[perm], f[perm])
+        npt.assert_allclose(sm_unsorted, sm_sorted[perm], rtol=1e-12, atol=1e-12)
+
+    def test_fifteen_cadences_single_block_returns_nan(self):
+        """N=15 cadences yields only 1 block (bl_sz=13) and must return NaN, not 0.0 ppm."""
+        rng = np.random.default_rng(15)
+        t = np.arange(15, dtype=np.float64) * 0.0204
+        f = 1.0 + 5e-4 * rng.standard_normal(15)
+        result = cdpp(t, f, bl_sz=13)
+        assert np.isnan(result)
+
+    def test_under_seven_cadences_returns_nan_without_warning(self):
+        """< 7 cadences must return NaN with zero RuntimeWarning (no dof <= 0 warning)."""
+        import warnings
+
+        t = np.arange(5, dtype=np.float64) * 0.0204
+        f = np.array([1.0, 1.001, 0.999, 1.002, 0.998], dtype=np.float64)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = cdpp(t, f, bl_sz=13)
+        assert np.isnan(result)
+        runtime_warns = [w for w in caught if issubclass(w.category, RuntimeWarning)]
+        assert runtime_warns == []
+
+    def test_degenerate_inputs_return_nan(self):
+        """Empty, 1-point, all-NaN, and zero-mean light curves return NaN cleanly."""
+        assert np.isnan(cdpp(np.array([]), np.array([])))
+        assert np.isnan(cdpp(np.array([1.0]), np.array([100.0])))
+        assert np.isnan(cdpp(np.arange(50.0) * 0.0204, np.full(50, np.nan)))
+        # Zero-mean flux
+        t = np.arange(100, dtype=np.float64) * 0.0204
+        f_zero = np.sin(2.0 * np.pi * np.arange(100) / 10.0)
+        f_zero -= f_zero.mean()
+        assert np.isnan(cdpp(t, f_zero))
+
+    def test_noiseless_constant_flux_returns_zero(self):
+        """Noiseless constant flux (s2 == 0) must return 0.0 without IndexError."""
+        t = np.arange(100, dtype=np.float64) * 0.0204
+        f_const = np.full(100, 1000.0, dtype=np.float64)
+        result = cdpp(t, f_const)
+        assert result == 0.0
+
+        # Short constant series (< 2 blocks) still returns NaN
+        assert np.isnan(cdpp(t[:15], f_const[:15], bl_sz=13))

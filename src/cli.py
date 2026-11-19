@@ -15,16 +15,7 @@ from glob import glob
 from os.path import abspath, basename, dirname, exists, isdir, join, splitext
 from typing import Any
 
-import astropy.io.fits as pf
-import numpy as np
-
-from ._jax_env import ensure_float64
-from .core import M_OUTLIER_D, M_OUTLIER_U
-from .k2io import FITSWriter, SPLOXReader, select_reader
-from .k2scfile import K2SCFile, submed
-from .kernels import kernels
-
-ensure_float64()
+from ._jax_env import configure_single_thread_env, ensure_float64
 
 _MPI_ENV_VARS = (
     "OMPI_COMM_WORLD_SIZE",
@@ -33,6 +24,28 @@ _MPI_ENV_VARS = (
     "MPI_LOCALNRANKS",
     "SLURM_NTASKS",
 )
+
+
+def _mpi_env_requested() -> bool:
+    """Return True if an MPI launcher environment variable requests > 1 rank."""
+    for var in _MPI_ENV_VARS:
+        val = os.environ.get(var, "")
+        if val.isdigit() and int(val) > 1:
+            return True
+    return False
+
+
+# Set float64 and single-threaded BLAS/OpenMP/XLA limits BEFORE numpy/jax load under MPI.
+ensure_float64()
+if _mpi_env_requested():
+    configure_single_thread_env()
+
+import astropy.io.fits as pf
+import numpy as np
+
+from .k2io import AMCReader, FITSWriter, SPLOXReader, select_reader
+from .k2scfile import K2SCFile
+
 _FILELIST_EXTENSIONS = {".txt", ".list", ".lst"}
 _RE_EPIC = re.compile(r"EPIC_0*([0-9]+)")
 
@@ -40,16 +53,13 @@ _RE_EPIC = re.compile(r"EPIC_0*([0-9]+)")
 def _detect_mpi_comm(explicit_comm: Any | None = None) -> tuple[Any | None, int, int]:
     """Return ``(comm, rank, size)``, lazily importing ``mpi4py`` only under active MPI."""
     if explicit_comm is not None:
-        return explicit_comm, int(explicit_comm.Get_rank()), int(explicit_comm.Get_size())
+        return (
+            explicit_comm,
+            int(explicit_comm.Get_rank()),
+            int(explicit_comm.Get_size()),
+        )
 
-    mpi_requested = False
-    for var in _MPI_ENV_VARS:
-        val = os.environ.get(var, "")
-        if val.isdigit() and int(val) > 1:
-            mpi_requested = True
-            break
-
-    if not mpi_requested:
+    if not _mpi_env_requested():
         return None, 0, 1
 
     try:
@@ -92,7 +102,9 @@ def _read_filelist_entries(list_path: str) -> list[str]:
                 entries.append(abspath(line))
             else:
                 rel_candidate = join(base_dir, line)
-                entries.append(abspath(rel_candidate) if exists(rel_candidate) else line)
+                entries.append(
+                    abspath(rel_candidate) if exists(rel_candidate) else line
+                )
     return entries
 
 
@@ -113,9 +125,16 @@ def expand_input_files(raw_files: Sequence[str]) -> tuple[list[str], bool]:
         if item.startswith("@"):
             list_file = item[1:]
             if not exists(list_file):
-                raise FileNotFoundError(f"Input file list {list_file!r} does not exist.")
+                raise FileNotFoundError(
+                    f"Input file list {list_file!r} does not exist."
+                )
             expanded.extend(_read_filelist_entries(list_file))
-        elif exists(item) and not isdir(item) and splitext(item)[1].lower() in _FILELIST_EXTENSIONS:
+        elif (
+            exists(item)
+            and not isdir(item)
+            and splitext(item)[1].lower() in _FILELIST_EXTENSIONS
+            and not AMCReader.can_read(item)
+        ):
             expanded.extend(_read_filelist_entries(item))
         elif isdir(item):
             matched = sorted(glob(join(item, "ktwo*.fits")))
@@ -129,6 +148,8 @@ def expand_input_files(raw_files: Sequence[str]) -> tuple[list[str], bool]:
 
 def build_k2sc_parser() -> ArgumentParser:
     """Construct the ``k2sc`` CLI ``ArgumentParser``."""
+    from .kernels import kernels
+
     ap = ArgumentParser(
         prog="k2sc",
         description="K2SC: Kepler/K2 and TESS systematics correction using JAX Gaussian Processes",
@@ -194,14 +215,22 @@ def build_k2sc_parser() -> ArgumentParser:
         default=None,
         help="Period for (quasi)periodic kernels when overriding period detection",
     )
-    ap.add_argument("--p-mask-center", type=float, default=None, help="Transit mask zero epoch")
-    ap.add_argument("--p-mask-period", type=float, default=None, help="Transit mask period")
+    ap.add_argument(
+        "--p-mask-center", type=float, default=None, help="Transit mask zero epoch"
+    )
+    ap.add_argument(
+        "--p-mask-period", type=float, default=None, help="Transit mask period"
+    )
     ap.add_argument(
         "--p-mask-duration", type=float, default=None, help="Transit mask duration"
     )
 
-    gts.add_argument("--tr-nrandom", default=400, type=int, help="Number of random samples")
-    gts.add_argument("--tr-nblocks", default=6, type=int, help="Number of sample blocks")
+    gts.add_argument(
+        "--tr-nrandom", default=400, type=int, help="Number of random samples"
+    )
+    gts.add_argument(
+        "--tr-nblocks", default=6, type=int, help="Number of sample blocks"
+    )
     gts.add_argument("--tr-bspan", default=50, type=int, help="Span of a single block")
 
     gde.add_argument(
@@ -248,10 +277,16 @@ def build_k2sc_parser() -> ArgumentParser:
         help="Maximum log10(FAP) threshold to select a quasiperiodic kernel",
     )
     gps.add_argument(
-        "--ls-min-period", default=0.05, type=float, help="Minimum period to search (days)"
+        "--ls-min-period",
+        default=0.05,
+        type=float,
+        help="Minimum period to search (days)",
     )
     gps.add_argument(
-        "--ls-max-period", default=25.0, type=float, help="Maximum period to search (days)"
+        "--ls-max-period",
+        default=25.0,
+        type=float,
+        help="Maximum period to search (days)",
     )
 
     god.add_argument("--outlier-sigma", default=5.0, type=float)
@@ -322,7 +357,9 @@ def _detrend_and_write_dataset(
             **opt_kwargs,
         )
         splits_used = results[0].splits if results else []
-        out_name = _format_output_filename(reader_cls.fn_out_template, int(dataset.epic))
+        out_name = _format_output_filename(
+            reader_cls.fn_out_template, int(dataset.epic)
+        )
         fpath_out = join(args.save_dir, out_name)
         FITSWriter.write(fpath_out, splits_used, dataset, results)
         if not args.quiet:
@@ -344,6 +381,8 @@ def main(argv: Sequence[str] | None = None, *, comm: Any | None = None) -> int:
 
     mpi_comm, mpi_rank, mpi_size = _detect_mpi_comm(comm)
     with_mpi = mpi_comm is not None and mpi_size > 1
+    if mpi_size > 1:
+        configure_single_thread_env()
     mpi_root = 0
 
     master_logger = logging.getLogger("k2sc.master")
@@ -351,7 +390,9 @@ def main(argv: Sequence[str] | None = None, *, comm: Any | None = None) -> int:
     stream_handler: logging.Handler | None = None
     if not master_logger.handlers:
         stream_handler = logging.StreamHandler(sys.stderr)
-        stream_handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+        stream_handler.setFormatter(
+            logging.Formatter("%(levelname)s %(name)s: %(message)s")
+        )
         master_logger.addHandler(stream_handler)
 
     master_fh: logging.Handler | None = None
@@ -369,7 +410,9 @@ def main(argv: Sequence[str] | None = None, *, comm: Any | None = None) -> int:
             return 2
 
         if not exists(args.save_dir):
-            master_logger.error("Error: the save directory %s does not exist.", args.save_dir)
+            master_logger.error(
+                "Error: the save directory %s does not exist.", args.save_dir
+            )
             return errno.ENOENT
 
         if args.kernel and "periodic" in args.kernel and args.kernel_period is None:
@@ -390,20 +433,22 @@ def main(argv: Sequence[str] | None = None, *, comm: Any | None = None) -> int:
             return 1
 
         probe_file = next((f for f in expanded_files if exists(f)), expanded_files[0])
-        reader = select_reader(probe_file)
-        if reader is None:
-            master_logger.critical("Unrecognized input file type for file %s", probe_file)
+        probe_reader = select_reader(probe_file)
+        if probe_reader is None:
+            master_logger.critical(
+                "Unrecognized input file type for file %s", probe_file
+            )
             return 1
 
-        if len(expanded_files) == 1 and issubclass(reader, SPLOXReader):
+        if len(expanded_files) == 1 and issubclass(probe_reader, SPLOXReader):
             singlefile = True
             infile = expanded_files[0]
             end_idx = (
                 int(args.end_i)
                 if args.end_i is not None
-                else int(reader.nstars(infile))
+                else int(probe_reader.nstars(infile))
             )
-            stop_idx = min(end_idx, int(reader.nstars(infile)))
+            stop_idx = min(end_idx, int(probe_reader.nstars(infile)))
             items: list[Any] = list(range(int(args.start_i), stop_idx))
         else:
             singlefile = False
@@ -420,13 +465,16 @@ def main(argv: Sequence[str] | None = None, *, comm: Any | None = None) -> int:
                     n_items,
                     mpi_size - 1,
                 )
-            master_logger.info("Saving results to %s (optimizer=%s)", args.save_dir, args.optimizer)
+            master_logger.info(
+                "Saving results to %s (optimizer=%s)", args.save_dir, args.optimizer
+            )
 
         if not with_mpi:
             for item in items:
                 if singlefile:
                     sid = int(item)
                     cur_file = infile
+                    cur_reader = probe_reader
                 else:
                     sid = 0
                     cur_file = str(item)
@@ -435,13 +483,20 @@ def main(argv: Sequence[str] | None = None, *, comm: Any | None = None) -> int:
                             "Input file %s does not exist; skipping.", cur_file
                         )
                         continue
-                dataset = reader.read(
+                    cur_reader = select_reader(cur_file)
+                    if cur_reader is None:
+                        master_logger.error(
+                            "Unrecognized input file type for file %s; skipping.",
+                            cur_file,
+                        )
+                        continue
+                dataset = cur_reader.read(
                     cur_file,
                     sid=sid,
                     type=args.flux_type,
                     campaign=args.campaign,
                 )
-                _detrend_and_write_dataset(dataset, reader, args, mpi_rank=0)
+                _detrend_and_write_dataset(dataset, cur_reader, args, mpi_rank=0)
             return 0
 
         # MPI master / worker dispatch
@@ -458,6 +513,7 @@ def main(argv: Sequence[str] | None = None, *, comm: Any | None = None) -> int:
                     if singlefile:
                         sid = int(item)
                         cur_file = infile
+                        cur_reader = probe_reader
                         if not args.quiet:
                             master_logger.info("Processing star %d", sid)
                     else:
@@ -468,18 +524,25 @@ def main(argv: Sequence[str] | None = None, *, comm: Any | None = None) -> int:
                                 "Input file %s does not exist; skipping.", cur_file
                             )
                             continue
+                        cur_reader = select_reader(cur_file)
+                        if cur_reader is None:
+                            master_logger.error(
+                                "Unrecognized input file type for file %s; skipping.",
+                                cur_file,
+                            )
+                            continue
                         if not args.quiet:
                             master_logger.info("Processing file %s", abspath(cur_file))
 
-                    # Only claim a free worker AFTER verifying the file exists (preventing worker leak)
+                    # Only claim a free worker AFTER verifying the file exists and has a reader
                     w = free_workers.pop()
-                    dataset = reader.read(
+                    dataset = cur_reader.read(
                         cur_file,
                         sid=sid,
                         type=args.flux_type,
                         campaign=args.campaign,
                     )
-                    mpi_comm.send((dataset, reader), dest=w, tag=0)
+                    mpi_comm.send((dataset, cur_reader), dest=w, tag=0)
                     active_workers.append(w)
 
                 for w in list(active_workers):
@@ -507,7 +570,9 @@ def main(argv: Sequence[str] | None = None, *, comm: Any | None = None) -> int:
                 if isinstance(payload, int) and payload == -1:
                     break
                 dataset, worker_reader = payload
-                _detrend_and_write_dataset(dataset, worker_reader, args, mpi_rank=mpi_rank)
+                _detrend_and_write_dataset(
+                    dataset, worker_reader, args, mpi_rank=mpi_rank
+                )
                 mpi_comm.send(int(dataset.epic), dest=mpi_root, tag=2)
 
         return 0
@@ -524,10 +589,21 @@ def main(argv: Sequence[str] | None = None, *, comm: Any | None = None) -> int:
 
 def _extract_epic_from_fits_or_name(fname: str, header) -> int:
     """Resolve integer EPIC / target identifier from FITS header or filename."""
-    for key in ("EPIC", "OBJECT", "KEPLERID"):
+    for key in ("EPIC", "KEPLERID", "TICID", "OBJECT"):
         if key in header:
+            val = header[key]
             with contextlib.suppress(TypeError, ValueError):
-                return int(header[key])
+                ival = int(val)
+                if ival > 0:
+                    return ival
+            if isinstance(val, str):
+                m_obj = re.search(
+                    r"(?:EPIC|KIC|TIC|KEPLERID)\s*[-_:]?\s*0*([0-9]+)",
+                    val,
+                    re.IGNORECASE,
+                )
+                if m_obj:
+                    return int(m_obj.group(1))
     m = _RE_EPIC.search(basename(fname))
     if m:
         return int(m.group(1))
@@ -546,9 +622,15 @@ def main_plot(argv: Sequence[str] | None = None) -> int:
         description="Generate diagnostic PDF report from a K2SC FITS output file.",
     )
     ap.add_argument("file_name", type=str, help="Input K2SC FITS file")
-    ap.add_argument("--save-dir", default=".", type=str, help="Directory for output PDF")
-    ap.add_argument("--output", "-o", default=None, type=str, help="Explicit output PDF path")
-    ap.add_argument("--show", default=False, action="store_true", help="Display interactively")
+    ap.add_argument(
+        "--save-dir", default=".", type=str, help="Directory for output PDF"
+    )
+    ap.add_argument(
+        "--output", "-o", default=None, type=str, help="Explicit output PDF path"
+    )
+    ap.add_argument(
+        "--show", default=False, action="store_true", help="Display interactively"
+    )
     args = ap.parse_args(argv)
 
     fname = args.file_name
@@ -563,16 +645,16 @@ def main_plot(argv: Sequence[str] | None = None) -> int:
 
     # Detect single-aperture ('flux') vs multi-aperture ('flux_1', 'flux_2', ...)
     if "flux" in col_names:
-        ap_suffixes = [""]
+        ap_specs: list[tuple[int, str]] = [(1, "")]
     else:
         ap_indices = sorted(
             int(c.split("_")[1])
             for c in col_names
             if c.startswith("flux_") and c.split("_")[1].isdigit()
         )
-        ap_suffixes = [f"_{idx}" for idx in ap_indices]
+        ap_specs = [(idx, f"_{idx}") for idx in ap_indices]
 
-    if not ap_suffixes:
+    if not ap_specs:
         print(f"Error: no K2SC flux columns found in {fname!r}.", file=sys.stderr)
         return 1
 
@@ -584,31 +666,33 @@ def main_plot(argv: Sequence[str] | None = None) -> int:
     c_header = "#002147"
 
     time_arr = np.asarray(data["time"], dtype=np.float64)
-    x_arr = np.asarray(data["x"], dtype=np.float64) if "x" in col_names else np.zeros_like(time_arr)
-    y_arr = np.asarray(data["y"], dtype=np.float64) if "y" in col_names else np.zeros_like(time_arr)
-
-    # Also instantiate K2SCFile when single-aperture to validate K2SCFile readability
-    k2sc_file_obj = K2SCFile(fname) if ap_suffixes == [""] else None
+    x_arr = (
+        np.asarray(data["x"], dtype=np.float64)
+        if "x" in col_names
+        else np.zeros_like(time_arr)
+    )
+    y_arr = (
+        np.asarray(data["y"], dtype=np.float64)
+        if "y" in col_names
+        else np.zeros_like(time_arr)
+    )
 
     with PdfPages(pdf_path) as pdf:
-        for ap_idx, sfx in enumerate(ap_suffixes, start=1):
+        for ap_idx, sfx in ap_specs:
             hdr_sfx = "" if sfx == "" else str(ap_idx)
-            if k2sc_file_obj is not None and sfx == "":
-                flux_raw = np.asarray(data["flux"], dtype=np.float64)
-                tr_time = np.asarray(data["trtime"], dtype=np.float64)
-                tr_pos = np.asarray(data["trposi"], dtype=np.float64)
-                mflags = np.asarray(data["mflags"], dtype=np.uint8)
-            else:
-                flux_raw = np.asarray(data[f"flux{sfx}"], dtype=np.float64)
-                tr_time = np.asarray(data[f"trtime{sfx}"], dtype=np.float64)
-                tr_pos = np.asarray(data[f"trposi{sfx}"], dtype=np.float64)
-                mflags = np.asarray(data[f"mflags{sfx}"], dtype=np.uint8)
-
-            flux_corr = flux_raw - submed(tr_pos)
-            flux_res = flux_corr - submed(tr_time)
+            # Delegate HLSP vs raw K2SC trend reconstruction to K2SCFile so
+            # k2mastify HLSP files (EXTNAME in ('PDC', 'SAP')) are never double-subtracted.
+            kf = K2SCFile(
+                fname, aperture=ap_idx, remove_nans=False, remove_outliers=False
+            )
+            flux_raw = kf.original_flux
+            flux_corr = kf.detrended_flux
+            flux_res = kf.residual_flux
+            tr_time = kf.time_trend
+            tr_pos = kf.position_trend
+            is_outlier = ~kf.outlier_mask
 
             fin = np.isfinite(time_arr) & np.isfinite(flux_raw)
-            is_outlier = (mflags & (M_OUTLIER_U | M_OUTLIER_D)).astype(bool)
             inlier = fin & (~is_outlier)
 
             cdpp_r = hdr.get(f"cdpp{hdr_sfx}r", float("nan"))
@@ -657,7 +741,9 @@ def main_plot(argv: Sequence[str] | None = None) -> int:
             if np.any(fin):
                 med_f = float(np.nanmedian(flux_raw[fin]))
                 scale = med_f if (np.isfinite(med_f) and med_f != 0.0) else 1.0
-                axes[0].plot(time_arr[inlier], flux_raw[inlier] / scale, ".", ms=2, color="0.25")
+                axes[0].plot(
+                    time_arr[inlier], flux_raw[inlier] / scale, ".", ms=2, color="0.25"
+                )
                 if np.any(fin & is_outlier):
                     axes[0].plot(
                         time_arr[fin & is_outlier],
@@ -736,6 +822,116 @@ def _read_cdpp_triplet(hdr) -> list[float]:
     return [float(hdr["cdpp1r"]), float(hdr["cdpp1t"]), float(hdr["cdpp1c"])]
 
 
+_GINFO_COLS_BASIC = [
+    "time_amplitude",
+    "time_iscale",
+    "xy_amplitude",
+    "x_iscale",
+    "y_iscale",
+    "white_noise",
+    "cdppr",
+    "cdppt",
+    "cdppc",
+]
+_GINFO_COLS_QPERI = [
+    "time_amplitude",
+    "time_iscale",
+    "time_period",
+    "time_evolution",
+    "xy_amplitude",
+    "x_iscale",
+    "y_iscale",
+    "white_noise",
+    "cdppr",
+    "cdppt",
+    "cdppc",
+]
+_GINFO_COLS_PERI = [
+    "time_amplitude",
+    "time_iscale",
+    "time_period",
+    "tl_amplitude",
+    "tl_iscale",
+    "xy_amplitude",
+    "x_iscale",
+    "y_iscale",
+    "white_noise",
+    "cdppr",
+    "cdppt",
+    "cdppc",
+]
+
+
+def _gather_ginfo_rows(
+    files: Sequence[str],
+) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray], list[dict[str, Any]]]:
+    """Collect hyperparameter rows for Basic (6), QuasiPeriodic (8), and Periodic (9) kernels."""
+    hps_basic: list[np.ndarray] = []
+    hps_qperi: list[np.ndarray] = []
+    hps_peri: list[np.ndarray] = []
+    summary_rows: list[dict[str, Any]] = []
+
+    for fpath in files:
+        hdr = pf.getheader(fpath, 1)
+        ker_name = str(hdr.get("ker_name", "BasicKernel"))
+        ker_lower = ker_name.lower()
+        epic = _extract_epic_from_fits_or_name(fpath, hdr)
+        raw_hps = str(hdr.get("ker_hps1", "[]")).strip("[] ")
+        v = np.fromstring(raw_hps, sep=" ", dtype=np.float64)
+        s = _read_cdpp_triplet(hdr)
+
+        row_vec = np.r_[[float(epic)], v, s]
+        if "basic" in ker_lower and v.size == 6:
+            hps_basic.append(row_vec)
+        elif "quasiperiodic" in ker_lower and v.size == 8:
+            hps_qperi.append(row_vec)
+        elif "periodic" in ker_lower and v.size == 9:
+            hps_peri.append(row_vec)
+        elif v.size == 6:
+            hps_basic.append(row_vec)
+        elif v.size == 8:
+            hps_qperi.append(row_vec)
+        elif v.size == 9:
+            hps_peri.append(row_vec)
+
+        summary_rows.append(
+            {
+                "epic": int(epic),
+                "ker_name": ker_name,
+                "cdppr": s[0],
+                "cdppt": s[1],
+                "cdppc": s[2],
+                "ker_hps1": " ".join(f"{val:.8g}" for val in v),
+            }
+        )
+
+    return hps_basic, hps_qperi, hps_peri, summary_rows
+
+
+def _build_ginfo_dataframes(
+    files: Sequence[str],
+):
+    """Return ``(df_basic, df_qperi, df_peri, summary_rows)`` for ``k2ginfo``."""
+    import pandas as pd
+
+    hps_basic, hps_qperi, hps_peri, summary_rows = _gather_ginfo_rows(files)
+
+    def _to_df(rows: list[np.ndarray], cols: list[str]) -> pd.DataFrame:
+        if rows:
+            arr = np.asarray(rows, dtype=np.float64)
+            return pd.DataFrame(
+                arr[:, 1:], columns=cols, index=arr[:, 0].astype(np.uint32)
+            )
+        return pd.DataFrame(columns=cols, dtype=np.float64)
+
+    return (
+        _to_df(hps_basic, _GINFO_COLS_BASIC),
+        _to_df(hps_qperi, _GINFO_COLS_QPERI),
+        _to_df(hps_peri, _GINFO_COLS_PERI),
+        summary_rows,
+    )
+
+
 def main_ginfo(argv: Sequence[str] | None = None) -> int:
     """Entry point for ``k2ginfo``: gather hyperparameters and CDPP statistics across FITS files."""
     ap = ArgumentParser(
@@ -746,7 +942,9 @@ def main_ginfo(argv: Sequence[str] | None = None) -> int:
         "hdfname",
         help="Output summary file (.h5/.hdf requiring PyTables, or .csv / .fits)",
     )
-    ap.add_argument("datadir", help="Directory containing K2SC EPIC_*.fits output files")
+    ap.add_argument(
+        "datadir", help="Directory containing K2SC EPIC_*.fits output files"
+    )
     ap.add_argument("--random-sample", default=None, type=int)
     ap.add_argument("--seed", default=0, type=int)
     args = ap.parse_args(argv)
@@ -760,91 +958,31 @@ def main_ginfo(argv: Sequence[str] | None = None) -> int:
 
     if args.random_sample is not None and args.random_sample < len(files):
         rng = np.random.default_rng(args.seed)
-        chosen = np.sort(rng.choice(len(files), size=int(args.random_sample), replace=False))
-        files = [files[int(i)] for i in chosen]
-
-    c_basic = [
-        "time_amplitude",
-        "time_iscale",
-        "xy_amplitude",
-        "x_iscale",
-        "y_iscale",
-        "white_noise",
-        "cdppr",
-        "cdppt",
-        "cdppc",
-    ]
-    c_qperi = [
-        "time_amplitude",
-        "time_scale",
-        "time_period",
-        "time_evolution",
-        "xy_amplitude",
-        "x_scale",
-        "y_scale",
-        "white_noise",
-        "cdppr",
-        "cdppt",
-        "cdppc",
-    ]
-
-    hps_basic: list[np.ndarray] = []
-    hps_qperi: list[np.ndarray] = []
-    summary_rows: list[dict[str, Any]] = []
-
-    for fpath in files:
-        hdr = pf.getheader(fpath, 1)
-        ker_name = str(hdr.get("ker_name", "BasicKernel"))
-        epic = _extract_epic_from_fits_or_name(fpath, hdr)
-        raw_hps = str(hdr.get("ker_hps1", "[]")).strip("[] ")
-        v = np.fromstring(raw_hps, sep=" ", dtype=np.float64)
-        s = _read_cdpp_triplet(hdr)
-
-        row_vec = np.r_[[float(epic)], v, s]
-        if "basic" in ker_name.lower() and v.size == 6:
-            hps_basic.append(row_vec)
-        elif v.size == 8:
-            hps_qperi.append(row_vec)
-
-        summary_rows.append(
-            {
-                "epic": int(epic),
-                "ker_name": ker_name,
-                "cdppr": s[0],
-                "cdppt": s[1],
-                "cdppc": s[2],
-                "ker_hps1": " ".join(f"{val:.8g}" for val in v),
-            }
+        chosen = np.sort(
+            rng.choice(len(files), size=int(args.random_sample), replace=False)
         )
+        files = [files[int(i)] for i in chosen]
 
     out_ext = splitext(args.hdfname)[1].lower()
     if out_ext in (".fits", ".fit"):
         from astropy.table import Table
 
+        _b, _q, _p, summary_rows = _gather_ginfo_rows(files)
         tbl = Table(rows=summary_rows)
         tbl.write(args.hdfname, format="fits", overwrite=True)
         return 0
 
     import pandas as pd
 
-    if hps_basic:
-        arr_b = np.asarray(hps_basic, dtype=np.float64)
-        dfb = pd.DataFrame(arr_b[:, 1:], columns=c_basic, index=arr_b[:, 0].astype(np.uint32))
-    else:
-        dfb = pd.DataFrame(columns=c_basic, dtype=np.float64)
-
-    if hps_qperi:
-        arr_q = np.asarray(hps_qperi, dtype=np.float64)
-        dfp = pd.DataFrame(arr_q[:, 1:], columns=c_qperi, index=arr_q[:, 0].astype(np.uint32))
-    else:
-        dfp = pd.DataFrame(columns=c_qperi, dtype=np.float64)
+    dfb, dfq, dfp, summary_rows = _build_ginfo_dataframes(files)
 
     if out_ext == ".csv":
         pd.DataFrame(summary_rows).to_csv(args.hdfname, index=False)
         return 0
 
     dfb.to_hdf(args.hdfname, key="basic", mode="w")
-    dfp.to_hdf(args.hdfname, key="quasiperiodic", mode="a")
+    dfq.to_hdf(args.hdfname, key="quasiperiodic", mode="a")
+    dfp.to_hdf(args.hdfname, key="periodic", mode="a")
     return 0
 
 
@@ -896,9 +1034,15 @@ def main_mastify(argv: Sequence[str] | None = None) -> int:
                 epdc = fpdc[1].copy()
                 esap = fsap[1].copy()
 
-                epri.header["origin"] = epdc.header.get("origin", "SPLOX")
-                epri.header["creator"] = epdc.header.get("program", "k2SC v2.0")
-                epri.header["date"] = now_str
+                epri.header["ORIGIN"] = (
+                    epdc.header.get("origin", "SPLOX: Stars and Planets at Oxford"),
+                    "Data origin",
+                )
+                epri.header["CREATOR"] = (
+                    epdc.header.get("program", "k2SC v2.0"),
+                    "Detrending pipeline",
+                )
+                epri.header["DATE"] = (now_str, "File creation date (UTC)")
 
                 for k in ("procver", "filever", "timversn", "checksum", "object"):
                     if k in epri.header:

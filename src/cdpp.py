@@ -31,6 +31,7 @@ ensure_float64()
 # Vectorised JAX Savitzky-Golay filter
 # ---------------------------------------------------------------------------
 
+
 def _build_vandermonde_centered(tau: jax.Array, polyorder: int) -> jax.Array:
     """Return the Vandermonde matrix for centred coordinates.
 
@@ -46,7 +47,7 @@ def _build_vandermonde_centered(tau: jax.Array, polyorder: int) -> jax.Array:
     V:
         Vandermonde matrix, shape ``(K, polyorder + 1)``.
     """
-    return jnp.stack([tau ** k for k in range(polyorder + 1)], axis=1)
+    return jnp.stack([tau**k for k in range(polyorder + 1)], axis=1)
 
 
 def _solve_local_poly(
@@ -102,7 +103,9 @@ def _solve_local_poly(
     # For sparse windows (< polyorder+1 valid points) return mean or NaN
     has_enough = n_pts >= (polyorder + 1)
     has_any = n_pts >= 1
-    mean_val = jnp.where(has_any, jnp.sum(w * flux_win) / jnp.where(n_pts > 0, n_pts, 1.0), jnp.nan)
+    mean_val = jnp.where(
+        has_any, jnp.sum(w * flux_win) / jnp.where(n_pts > 0, n_pts, 1.0), jnp.nan
+    )
     return jnp.where(has_enough, c0, mean_val)
 
 
@@ -116,7 +119,9 @@ def _solve_all_jit(
     polyorder: int,
 ) -> jax.Array:
     return jax.vmap(
-        lambda tau_i, flux_i, mask_i: _solve_local_poly(tau_i, flux_i, mask_i, polyorder)
+        lambda tau_i, flux_i, mask_i: _solve_local_poly(
+            tau_i, flux_i, mask_i, polyorder
+        )
     )(tau_b, flux_b, mask_b)
 
 
@@ -156,31 +161,42 @@ def savgol_filter(
     t = np.asarray(t, dtype=np.float64)
     f = np.asarray(f, dtype=np.float64)
     n = len(t)
+    if n == 0:
+        return np.array([], dtype=np.float64)
+
+    unsorted = n > 1 and bool(np.any(t[1:] < t[:-1]))
+    if unsorted:
+        order = np.argsort(t, kind="mergesort")
+        t_work = t[order]
+        f_work = f[order]
+    else:
+        t_work = t
+        f_work = f
 
     half_wd = wd / 2.0
 
     # Window bounds via searchsorted — O(N log N), pure numpy
-    l_idx = np.searchsorted(t, t - half_wd, side='left')   # shape (N,)
-    r_idx = np.searchsorted(t, t + half_wd, side='right')  # shape (N,)
+    l_idx = np.searchsorted(t_work, t_work - half_wd, side="left")  # shape (N,)
+    r_idx = np.searchsorted(t_work, t_work + half_wd, side="right")  # shape (N,)
     k_max = int(np.max(r_idx - l_idx))
     if k_max == 0:
         return np.full(n, np.nan)
 
     # Build padded (N, K_max) arrays for vmap — no Python loop, O(N·K_max) numpy.
     # Strategy: for each i, fill positions l_idx[i]:r_idx[i] relative to i.
-    # We use vectorised indexing: build an (N, K_max) index array.
-    col = np.arange(k_max, dtype=np.int64)[None, :]           # (1, K_max)
-    start = l_idx[:, None]                                     # (N, 1)
-    abs_idx = start + col                                      # (N, K_max)
+    # We use vectorized indexing: build an (N, K_max) index array.
+    col = np.arange(k_max, dtype=np.int64)[None, :]  # (1, K_max)
+    start = l_idx[:, None]  # (N, 1)
+    abs_idx = start + col  # (N, K_max)
     # Clamp to valid range
     abs_idx_clamped = np.clip(abs_idx, 0, n - 1)
     # Mask: True where col < (r_idx - l_idx), i.e. point is in window
-    win_len = (r_idx - l_idx)[:, None]                        # (N, 1)
-    mask_all = col < win_len                                   # (N, K_max)
+    win_len = (r_idx - l_idx)[:, None]  # (N, 1)
+    mask_all = col < win_len  # (N, K_max)
 
     # Gather flux and tau values using the clamped indices
-    flux_all = f[abs_idx_clamped]                              # (N, K_max)
-    tau_all = t[abs_idx_clamped] - t[:, None]                 # (N, K_max)
+    flux_all = f_work[abs_idx_clamped]  # (N, K_max)
+    tau_all = t_work[abs_idx_clamped] - t_work[:, None]  # (N, K_max)
 
     # Zero out padding (masked-out positions are irrelevant but keep clean)
     flux_all = np.where(mask_all, flux_all, 0.0)
@@ -190,13 +206,20 @@ def savgol_filter(
     flux_jax = jnp.array(flux_all, dtype=jnp.float64)
     mask_jax = jnp.array(mask_all, dtype=bool)
 
-    result = np.asarray(_solve_all_jit(tau_jax, flux_jax, mask_jax, polyorder), dtype=np.float64)
+    result = np.asarray(
+        _solve_all_jit(tau_jax, flux_jax, mask_jax, polyorder), dtype=np.float64
+    )
+    if unsorted:
+        out = np.empty(n, dtype=np.float64)
+        out[order] = result
+        return out
     return result
 
 
 # ---------------------------------------------------------------------------
 # block_mean — fixed Python 3 integer division
 # ---------------------------------------------------------------------------
+
 
 def block_mean(
     t: np.ndarray,
@@ -225,12 +248,18 @@ def block_mean(
     f_blocks:
         Block-mean fluxes.
     """
+    t = np.asarray(t, dtype=np.float64)
+    f = np.asarray(f, dtype=np.float64)
     block_size = int(block_size)
     if block_size_min is None:
         # Python 3 fix: use integer division // (was / which gave 7.5 for 13)
         block_size_min = block_size // 2 + 1
     n = len(t)
-    dt = np.median(t[1:] - t[:-1])
+    if n < 2:
+        return np.array([], dtype=np.float64), np.array([], dtype=np.float64)
+    dt = float(np.median(t[1:] - t[:-1]))
+    if not np.isfinite(dt) or dt <= 0.0:
+        return np.array([], dtype=np.float64), np.array([], dtype=np.float64)
     t_blocks = []
     f_blocks = []
     i = 0
@@ -240,18 +269,21 @@ def block_mean(
             j += 1
             if j >= n:
                 break
+        if j == i:
+            break
         if j >= (i + block_size_min):
             t_blocks.append(t[i:j].mean())
             f_blocks.append(f[i:j].mean())
         i = int(j)
         if i >= n:
             break
-    return np.array(t_blocks), np.array(f_blocks)
+    return np.array(t_blocks, dtype=np.float64), np.array(f_blocks, dtype=np.float64)
 
 
 # ---------------------------------------------------------------------------
 # cdpp — public API
 # ---------------------------------------------------------------------------
+
 
 def cdpp(
     time: np.ndarray,
@@ -288,43 +320,82 @@ def cdpp(
     cdpp_ppm:
         CDPP estimate in parts per million.
     """
-    from numpy import isfinite
+    time = np.asarray(time, dtype=np.float64)
+    flux = np.asarray(flux, dtype=np.float64)
 
-    m = isfinite(time) & isfinite(flux)
+    m = np.isfinite(time) & np.isfinite(flux)
     if exclude is not None:
+        exclude = np.asarray(exclude, dtype=bool)
         assert exclude.size == m.size, "Exclusion mask size != time and flux array size"
         m &= ~exclude
-    t, f = time[m], flux[m] / flux[m].mean()
+    if int(m.sum()) < 2:
+        return float("nan")
+
+    t = time[m]
+    f_raw = flux[m]
+    f_mean = float(f_raw.mean())
+    f_scale = float(np.max(np.abs(f_raw)))
+    if not np.isfinite(f_mean) or f_scale == 0.0 or abs(f_mean) <= 1e-12 * f_scale:
+        return float("nan")
+    f = f_raw / f_mean
+
+    # Sort by timestamp when unsorted so diff, savgol_filter, and block_mean are valid
+    if np.any(t[1:] < t[:-1]):
+        order = np.argsort(t, kind="mergesort")
+        t = t[order]
+        f = f[order]
 
     # Auto-compute bl_sz from transit duration if supplied
     if transit_duration_hours is not None:
         dt_med = float(np.nanmedian(np.diff(t))) if len(t) > 1 else 0.0204
-        if dt_med > 0:
+        if np.isfinite(dt_med) and dt_med > 0:
             bl_sz = max(1, round((transit_duration_hours / 24.0) / dt_med))
 
-    # Savitzky-Golay smoothing (1000× faster JAX implementation)
+    # Savitzky-Golay smoothing (vectorized JAX implementation)
     f_sm = savgol_filter(t, f, wd=dfilt)
     f_res = f - f_sm
 
-    # Exclude obvious outliers (5σ)
-    m2, s2 = f_res.mean(), f_res.std()
-    l2 = np.abs(f_res - m2) < (5 * s2)
+    fin_res = np.isfinite(f_res)
+    if int(fin_res.sum()) < 2:
+        return float("nan")
+    t_res = t[fin_res]
+    f_res_fin = f_res[fin_res]
 
-    # Compute bin-averaged fluxes
-    t_b, f_b = block_mean(t[l2], f_res[l2], block_size=bl_sz)
-    cdpp_val = float(f_b.std() * 1e6)
+    # Exclude obvious outliers (5-sigma); handle constant / noiseless flux cleanly
+    if float(np.ptp(f)) == 0.0:
+        f_res_fin = np.zeros_like(f_res_fin)
+        s2 = 0.0
+    else:
+        m2 = float(f_res_fin.mean())
+        s2 = float(f_res_fin.std())
+        if not np.isfinite(s2):
+            return float("nan")
+
+    if s2 == 0.0:
+        l2 = np.ones(f_res_fin.size, dtype=bool)
+    else:
+        l2 = np.abs(f_res_fin - m2) < (5.0 * s2)
+        if int(l2.sum()) < 2:
+            return float("nan")
+
+    # Compute bin-averaged fluxes; require at least 2 blocks for a valid std estimate
+    t_b, f_b = block_mean(t_res[l2], f_res_fin[l2], block_size=bl_sz)
+    if len(f_b) < 2:
+        return float("nan")
+    cdpp_val = 0.0 if s2 == 0.0 else float(f_b.std() * 1e6)
 
     if plot:
         import matplotlib.pyplot as plt
+
         plt.clf()
         plt.subplot(211)
-        plt.plot(time, flux / flux[m].mean(), ".", c="grey", mec="grey")
+        plt.plot(time, flux / f_mean, ".", c="grey", mec="grey")
         plt.plot(t, f, "k.")
         plt.plot(t, f_sm, "r-")
         plt.xlim(t.min(), t.max())
         plt.subplot(212)
-        plt.plot(t, f_res * 1e6, ".", c="grey", mec="grey")
-        plt.plot(t[l2], f_res[l2] * 1e6, "k.")
+        plt.plot(t_res, f_res_fin * 1e6, ".", c="grey", mec="grey")
+        plt.plot(t_res[l2], f_res_fin[l2] * 1e6, "k.")
         plt.plot(t_b, f_b * 1e6, "b.")
         plt.xlim(t.min(), t.max())
 

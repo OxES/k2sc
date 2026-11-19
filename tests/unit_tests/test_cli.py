@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import shutil
 import sys
+import warnings
 from pathlib import Path
 
 import astropy.io.fits as pf
 import k2sc
 import numpy as np
 import pytest
+from astropy.io.fits.verify import VerifyWarning
 from k2sc import cli
 from k2sc.k2scfile import K2SCFile
 
@@ -26,11 +28,16 @@ def _preserve_package_lazy_namespace():
 
 class TestCLIModuleHygiene:
     def test_cli_does_not_import_heavy_optional_packages(self):
-        # Verify zero unconditional mpi4py, seaborn, or IPython imports in cli.py
+        # Verify zero unconditional mpi4py, seaborn, IPython, or eager kernels imports in cli.py,
+        # and verify configure_single_thread_env runs before numpy/astropy under MPI.
         with open(_REPO_ROOT / "src" / "cli.py", encoding="utf-8") as fh:
             src_text = fh.read()
         assert "seaborn" not in src_text
         assert "IPython" not in src_text
+        assert "\nfrom .kernels import kernels" not in src_text
+        assert src_text.index("configure_single_thread_env()") < src_text.index(
+            "import numpy as np"
+        )
 
     def test_bin_wrappers_are_python3_thin_entrypoints(self):
         for script_name, fn_name in (
@@ -70,6 +77,19 @@ class TestFilelistExpansion:
         assert not from_dir_txt
         assert exp_txt == [str(f1.resolve()), str(f2.resolve())]
 
+    def test_amc_txt_lightcurve_not_misread_as_filelist(self, tmp_path):
+        """An AMC .txt light curve must NOT be expanded as a filelist (issues 14, 27, 28)."""
+        amc_txt = tmp_path / "EPIC_211436265.txt"
+        amc_txt.write_text(
+            "dates cadences flux1 err1 xpos ypos quality\n"
+            "2301.0 1000 5000.0 1.2 0.1 -0.1 0\n"
+            "2301.02 1001 5002.0 1.2 0.11 -0.09 0\n",
+            encoding="utf-8",
+        )
+        expanded, from_dir = cli.expand_input_files([str(amc_txt)])
+        assert not from_dir
+        assert expanded == [str(amc_txt.resolve())]
+
 
 class TestEndToEndCLIWorkflow:
     def test_main_k2sc_plot_ginfo_and_mastify_end_to_end(self, tmp_path):
@@ -92,33 +112,41 @@ class TestEndToEndCLIWorkflow:
         flist = tmp_path / "inputs.txt"
         flist.write_text(f"# test target\n{trimmed_fits.name}\n", encoding="utf-8")
 
-        rc_pdc = cli.main(
-            [
-                f"@{flist}",
-                "--save-dir",
-                str(pdc_dir),
-                "--flux-type",
-                "pdc",
-                "-c",
-                "5",
-                "--optimizer",
-                "multistart",
-                "--tr-nrandom",
-                "48",
-                "--tr-nblocks",
-                "2",
-                "--tr-bspan",
-                "16",
-                "--n-candidates",
-                "20",
-                "--maxiter",
-                "30",
-                "--seed",
-                "7",
-                "--quiet",
-            ]
-        )
+        with warnings.catch_warnings(record=True) as caught_cli:
+            warnings.simplefilter("always")
+            rc_pdc = cli.main(
+                [
+                    f"@{flist}",
+                    "--save-dir",
+                    str(pdc_dir),
+                    "--flux-type",
+                    "pdc",
+                    "-c",
+                    "5",
+                    "--optimizer",
+                    "multistart",
+                    "--tr-nrandom",
+                    "48",
+                    "--tr-nblocks",
+                    "2",
+                    "--tr-bspan",
+                    "16",
+                    "--n-candidates",
+                    "20",
+                    "--maxiter",
+                    "30",
+                    "--seed",
+                    "7",
+                    "--quiet",
+                ]
+            )
         assert rc_pdc == 0
+        verify_warns_cli = [
+            w for w in caught_cli if issubclass(w.category, VerifyWarning)
+        ]
+        assert verify_warns_cli == [], (
+            f"Unexpected FITS VerifyWarning: {verify_warns_cli}"
+        )
 
         out_pdc = pdc_dir / "EPIC_211436265_mast.fits"
         assert out_pdc.exists()
@@ -162,23 +190,54 @@ class TestEndToEndCLIWorkflow:
         # Test k2mastify (main_mastify) combining PDC and SAP K2SC FITS outputs
         shutil.copy2(out_pdc, sap_dir / out_pdc.name)
         hlsp_dir = tmp_path / "hlsp"
-        assert cli.main_mastify([str(pdc_dir), str(sap_dir), str(hlsp_dir)]) == 0
+        with warnings.catch_warnings(record=True) as caught_mastify:
+            warnings.simplefilter("always")
+            assert cli.main_mastify([str(pdc_dir), str(sap_dir), str(hlsp_dir)]) == 0
+        verify_warns_mastify = [
+            w for w in caught_mastify if issubclass(w.category, VerifyWarning)
+        ]
+        assert verify_warns_mastify == []
         hlsp_files = list(hlsp_dir.rglob("hlsp_k2sc_*.fits"))
         assert len(hlsp_files) == 1
         with pf.open(hlsp_files[0]) as hh:
             assert hh[1].header["EXTNAME"] == "PDC"
             assert hh[2].header["EXTNAME"] == "SAP"
 
-    def test_cli_error_codes_and_mpi_master_worker_protocol(self, tmp_path, monkeypatch):
+        # Verify K2SCFile and k2plot read the k2mastify HLSP file without double-subtracting trends
+        kfile_hlsp = K2SCFile(hlsp_files[0])
+        assert kfile_hlsp.is_hlsp is True
+        np.testing.assert_allclose(
+            kfile_hlsp.original_flux, kfile.original_flux, rtol=1e-10, atol=1e-8
+        )
+        hlsp_pdf = plot_dir / "hlsp_plot.pdf"
+        assert cli.main_plot([str(hlsp_files[0]), "-o", str(hlsp_pdf)]) == 0
+        assert hlsp_pdf.exists()
+        assert hlsp_pdf.read_bytes().startswith(b"%PDF-")
+
+    def test_cli_error_codes_and_mpi_master_worker_protocol(
+        self, tmp_path, monkeypatch
+    ):
         # Non-existent save directory returns ENOENT cleanly (without Logger TypeError)
         rc_bad_dir = cli.main(
-            [str(_SAMPLE_FITS), "--save-dir", str(tmp_path / "does_not_exist"), "--quiet"]
+            [
+                str(_SAMPLE_FITS),
+                "--save-dir",
+                str(tmp_path / "does_not_exist"),
+                "--quiet",
+            ]
         )
         assert rc_bad_dir != 0
 
         # Periodic kernel override without --kernel-period returns 1
         rc_no_per = cli.main(
-            [str(_SAMPLE_FITS), "--save-dir", str(tmp_path), "--kernel", "quasiperiodic", "--quiet"]
+            [
+                str(_SAMPLE_FITS),
+                "--save-dir",
+                str(tmp_path),
+                "--kernel",
+                "quasiperiodic",
+                "--quiet",
+            ]
         )
         assert rc_no_per == 1
 
@@ -187,9 +246,14 @@ class TestEndToEndCLIWorkflow:
         sent_messages: list[tuple[int, int, object]] = []
         valid_copy = tmp_path / _SAMPLE_FITS.name
         with pf.open(_SAMPLE_FITS) as hdul:
-            pf.HDUList([hdul[0].copy(), pf.BinTableHDU(data=hdul[1].data[:40], header=hdul[1].header.copy())]).writeto(
-                valid_copy, overwrite=True
-            )
+            pf.HDUList(
+                [
+                    hdul[0].copy(),
+                    pf.BinTableHDU(
+                        data=hdul[1].data[:40], header=hdul[1].header.copy()
+                    ),
+                ]
+            ).writeto(valid_copy, overwrite=True)
 
         class _MockMasterComm:
             def Get_rank(self) -> int:
@@ -202,7 +266,9 @@ class TestEndToEndCLIWorkflow:
                 sent_messages.append((dest, tag, obj))
 
             def Iprobe(self, source: int, tag: int = 0) -> bool:
-                return any(d == source and t == 0 and p != -1 for d, t, p in sent_messages)
+                return any(
+                    d == source and t == 0 and p != -1 for d, t, p in sent_messages
+                )
 
             def recv(self, source: int, tag: int = 0):
                 return 211436265
@@ -215,12 +281,16 @@ class TestEndToEndCLIWorkflow:
             comm=_MockMasterComm(),
         )
         assert rc_master == 0
-        shutdowns = sorted(dest for dest, tag, payload in sent_messages if tag == 0 and payload == -1)
+        shutdowns = sorted(
+            dest for dest, tag, payload in sent_messages if tag == 0 and payload == -1
+        )
         # Both workers 1 and 2 received -1 shutdown sentinel (zero leaked workers!)
         assert shutdowns == [1, 2]
 
         # Verify MPI worker terminates cleanly on integer -1 sentinel even after receiving a K2Data object
-        monkeypatch.setattr(cli, "_detrend_and_write_dataset", lambda ds, rdr, args, mpi_rank=0: "ok")
+        monkeypatch.setattr(
+            cli, "_detrend_and_write_dataset", lambda ds, rdr, args, mpi_rank=0: "ok"
+        )
         worker_acks: list[tuple[int, int, int]] = []
 
         class _DummyDataset:
@@ -249,3 +319,123 @@ class TestEndToEndCLIWorkflow:
         assert rc_worker == 0
         assert worker_acks == [(0, 2, 211436265)]
         assert "seaborn" not in sys.modules
+
+    def test_main_ginfo_periodic_kernel_and_iscale_labels(self, tmp_path):
+        """k2ginfo must retain 9-param PeriodicKernel rows and use *_iscale column names."""
+        specs = [
+            (211000001, "BasicKernel", "[-5.0 0.2 -4.5 18.0 19.0 -3.2]"),
+            (
+                211000002,
+                "QuasiPeriodicKernel",
+                "[-5.1 0.3 6.5 0.02 -4.8 20.0 21.0 -3.1]",
+            ),
+            (
+                211000003,
+                "PeriodicKernel",
+                "[-5.2 0.25 8.1 -5.8 0.01 -4.9 17.0 18.5 -3.0]",
+            ),
+        ]
+        fdir = tmp_path / "ginfo_fits"
+        fdir.mkdir()
+        for epic, kname, hps in specs:
+            cols = [pf.Column(name="time", format="D", array=np.array([1.0, 2.0]))]
+            hdu = pf.BinTableHDU.from_columns(cols)
+            hdu.header["EXTNAME"] = "K2SC"
+            hdu.header["EPIC"] = epic
+            hdu.header["KER_NAME"] = kname
+            hdu.header["KER_HPS1"] = hps
+            hdu.header["CDPPR"] = 100.0
+            hdu.header["CDPPT"] = 50.0
+            hdu.header["CDPPC"] = 40.0
+            pf.HDUList([pf.PrimaryHDU(), hdu]).writeto(
+                fdir / f"EPIC_{epic:09d}_mast.fits", overwrite=True
+            )
+
+        files = sorted(str(p) for p in fdir.glob("EPIC_*.fits"))
+        dfb, dfq, dfp, summary = cli._build_ginfo_dataframes(files)
+        assert len(dfb) == 1 and int(dfb.index[0]) == 211000001
+        assert len(dfq) == 1 and int(dfq.index[0]) == 211000002
+        assert len(dfp) == 1 and int(dfp.index[0]) == 211000003
+        assert len(summary) == 3
+
+        # Verify *_iscale labels in QuasiPeriodic and Periodic DataFrames
+        assert "time_iscale" in dfq.columns
+        assert "x_iscale" in dfq.columns
+        assert "y_iscale" in dfq.columns
+        assert "time_scale" not in dfq.columns
+        assert "x_scale" not in dfq.columns
+        assert "y_scale" not in dfq.columns
+        assert "tl_iscale" in dfp.columns
+        assert "x_iscale" in dfp.columns
+        assert "y_iscale" in dfp.columns
+
+        out_csv = tmp_path / "summary_all.csv"
+        assert cli.main_ginfo([str(out_csv), str(fdir)]) == 0
+        csv_text = out_csv.read_text(encoding="utf-8")
+        assert "PeriodicKernel" in csv_text
+        assert "211000003" in csv_text
+
+    def test_cli_mpi_single_thread_env_and_mixed_reader_batch(
+        self, tmp_path, monkeypatch
+    ):
+        """cli.main calls configure_single_thread_env under MPI and resolves readers per file."""
+        # 1. Verify configure_single_thread_env is invoked when mpi_size > 1
+        called: list[bool] = []
+        monkeypatch.setattr(
+            cli, "configure_single_thread_env", lambda: called.append(True)
+        )
+
+        # Prepare one trimmed MAST FITS and one AMC .txt light curve
+        mast_file = tmp_path / _SAMPLE_FITS.name
+        with pf.open(_SAMPLE_FITS) as hdul:
+            pf.HDUList(
+                [
+                    hdul[0].copy(),
+                    pf.BinTableHDU(
+                        data=hdul[1].data[:20], header=hdul[1].header.copy()
+                    ),
+                ]
+            ).writeto(mast_file, overwrite=True)
+
+        amc_txt = tmp_path / "EPIC_203794605.txt"
+        rows = ["dates cadences flux1 err1 xpos ypos quality\n"]
+        for i in range(20):
+            rows.append(
+                f"{2300.0 + i * 0.02:.5f} {1000 + i} {5000.0 + i:.3f} 1.0 "
+                f"{0.01 * i:.4f} {-0.01 * i:.4f} 0\n"
+            )
+        amc_txt.write_text("".join(rows), encoding="utf-8")
+
+        # 2. Mixed-reader non-MPI batch: resolve MASTReader for .fits and AMCReader for .txt
+        dispatched: list[tuple[int, str]] = []
+        monkeypatch.setattr(
+            cli,
+            "_detrend_and_write_dataset",
+            lambda ds, rdr, args, mpi_rank=0: (
+                dispatched.append((int(ds.epic), rdr.__name__)) or "ok"
+            ),
+        )
+        rc_mix = cli.main(
+            [str(mast_file), str(amc_txt), "--save-dir", str(tmp_path), "--quiet"]
+        )
+        assert rc_mix == 0
+        assert called == []  # single-process run did not force single-thread env
+        assert dispatched == [(211436265, "MASTReader"), (203794605, "AMCReader")]
+
+        # 3. Under MPI (mpi_size > 1), configure_single_thread_env MUST be called
+        class _MockWorkerDoneComm:
+            def Get_rank(self) -> int:
+                return 1
+
+            def Get_size(self) -> int:
+                return 4
+
+            def recv(self, source: int = 0, tag: int = 0):
+                return -1
+
+        rc_mpi = cli.main(
+            [str(mast_file), "--save-dir", str(tmp_path), "--quiet"],
+            comm=_MockWorkerDoneComm(),
+        )
+        assert rc_mpi == 0
+        assert called == [True]

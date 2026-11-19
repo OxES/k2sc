@@ -1,4 +1,4 @@
-"""Tests for src/utils.py — JAX-backed fold, medsig, sigma_clip.
+"""Tests for src/utils.py — pure-NumPy fold, medsig, sigma_clip.
 
 Covers:
 * ``fold`` with normalize=True/False, origo, shift.
@@ -19,6 +19,7 @@ RNG = np.random.default_rng(2025)
 # ---------------------------------------------------------------------------
 # fold tests
 # ---------------------------------------------------------------------------
+
 
 class TestFold:
     def test_basic_fold_normalize(self):
@@ -77,6 +78,7 @@ class TestFold:
 # medsig tests
 # ---------------------------------------------------------------------------
 
+
 class TestMedSig:
     def test_zero_finite_returns_nan_nan(self):
         """Array with no finite elements → (nan, nan)."""
@@ -131,6 +133,7 @@ class TestMedSig:
 # sigma_clip tests
 # ---------------------------------------------------------------------------
 
+
 class TestSigmaClip:
     def _make_array(self, seed=0):
         """100-element array with 5 outliers."""
@@ -155,11 +158,11 @@ class TestSigmaClip:
         tinf = np.ones(100, dtype=bool)
         thig = np.ones(100, dtype=bool)
         tlow = np.ones(100, dtype=bool)
-        tinf[55] = False   # NaN → not finite
-        thig[23] = False   # 1.8 is high outlier (>5σ)
-        thig[34] = False   # 31.0 is very high
-        tlow[6] = False    # -2.0 is low outlier
-        tlow[76] = False   # -5.0 is low outlier
+        tinf[55] = False  # NaN → not finite
+        thig[23] = False  # 1.8 is high outlier (>5σ)
+        thig[34] = False  # 31.0 is very high
+        tlow[6] = False  # -2.0 is low outlier
+        tlow[76] = False  # -5.0 is low outlier
         minf, mlow, mhig = sigma_clip(arr, separate_masks=True)
         npt.assert_array_equal(minf, tinf)
         npt.assert_array_equal(mlow, tlow)
@@ -219,3 +222,12 @@ class TestSigmaClip:
         m = sigma_clip(arr, max_iter=1, max_sigma=3.0)
         assert isinstance(m, np.ndarray)
         assert m.sum() > 0
+
+    def test_utils_docstring_accurate_for_pure_numpy(self):
+        """Module docstring must reflect pure-NumPy implementation, not stale JAX claims."""
+        import k2sc.utils as utils_mod
+
+        doc = utils_mod.__doc__ or ""
+        assert "jnp.nanmedian" not in doc
+        assert "jax.lax.while_loop" not in doc
+        assert "NumPy" in doc
