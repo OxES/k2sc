@@ -7,13 +7,29 @@ import numpy as np
 
 from .core import M_OUTLIER_D, M_OUTLIER_U, M_PERIODIC
 
+_HLSP_EXTNAMES = frozenset({"PDC", "SAP"})
+
 
 def submed(a):
-    return a - np.nanmedian(a)
+    """Subtract the finite median of ``a`` without warnings on all-NaN arrays."""
+    arr = np.asarray(a, dtype=np.float64)
+    fin = np.isfinite(arr)
+    if not np.any(fin):
+        return np.full_like(arr, np.nan, dtype=np.float64)
+    return arr - float(np.median(arr[fin]))
+
+
+def _submean(a) -> np.ndarray:
+    """Subtract the finite mean of ``a`` without warnings on all-NaN arrays."""
+    arr = np.asarray(a, dtype=np.float64)
+    fin = np.isfinite(arr)
+    if not np.any(fin):
+        return np.zeros_like(arr, dtype=np.float64)
+    return arr - float(np.mean(arr[fin]))
 
 
 class K2SCFile:
-    """Utility class to work with K2SC output files."""
+    """Utility class to work with K2SC output and MAST HLSP FITS files."""
 
     def __init__(
         self,
@@ -21,32 +37,84 @@ class K2SCFile:
         normalize: bool = False,
         remove_nans: bool = True,
         remove_outliers: bool = False,
+        aperture: int = 1,
+        ext: int | str = 1,
     ):
         """Initialize K2SCFile.
 
         Parameters
         ----------
         filename : str or Path
-            K2SC file path
+            K2SC output FITS file or ``k2mastify`` HLSP FITS file path.
         normalize : bool, optional
-            Normalize the light curves
+            Normalize the light curves by their finite median.
         remove_nans : bool, optional
-            Remove points with either not-finite time or flux
+            Remove points with either non-finite time or flux.
         remove_outliers : bool, optional
-            Remove points marked as outliers by K2SC
+            Remove points marked as outliers by K2SC.
+        aperture : int, optional
+            1-based aperture index for multi-aperture (``flux_1..N``) files
+            (default 1).
+        ext : int or str, optional
+            FITS table extension index or name (default 1, e.g. ``1``/``"PDC"``
+            or ``2``/``"SAP"`` for ``k2mastify`` HLSP files).
         """
         fname_str = str(filename)
         self._fname = fname_str
-        self._phead = pf.getheader(fname_str, 0)
-        self._dhead = pf.getheader(fname_str, 1)
-        self._data = pf.getdata(fname_str, 1)
-        self._time = np.asarray(self._data["time"], dtype=np.float64)
-        self._flux = np.asarray(self._data["flux"], dtype=np.float64)
-        self._tposi = np.asarray(self._data["trposi"], dtype=np.float64)
-        self._ttime = np.asarray(self._data["trtime"], dtype=np.float64)
-        mflags = np.asarray(self._data["mflags"], dtype=np.uint8)
+        self._aperture = int(aperture)
+        if self._aperture < 1:
+            raise ValueError(f"aperture must be a positive integer (got {aperture})")
 
-        self._minf = np.isfinite(self._flux) & np.isfinite(self._time)
+        with pf.open(fname_str) as hdul:
+            self._phead = hdul[0].header.copy()
+            hdu = hdul[ext]
+            self._dhead = hdu.header.copy()
+            self._data = hdu.data.copy()
+
+        col_map = {c.lower(): c for c in self._data.columns.names}
+        if "flux" in col_map:
+            if self._aperture != 1:
+                raise ValueError(
+                    f"Single-aperture file {fname_str!r} only supports aperture=1 "
+                    f"(got {self._aperture})"
+                )
+            sfx = ""
+        else:
+            sfx = f"_{self._aperture}"
+            if f"flux{sfx}" not in col_map:
+                avail = sorted(
+                    int(c.split("_")[1])
+                    for c in col_map
+                    if c.startswith("flux_") and c.split("_")[1].isdigit()
+                )
+                raise KeyError(
+                    f"Aperture {self._aperture} (column 'flux{sfx}') not found in "
+                    f"{fname_str!r}; available apertures: {avail}"
+                )
+
+        self._time = np.asarray(self._data[col_map["time"]], dtype=np.float64)
+        flux_col = np.asarray(self._data[col_map[f"flux{sfx}"]], dtype=np.float64)
+        self._tposi = np.asarray(self._data[col_map[f"trposi{sfx}"]], dtype=np.float64)
+        self._ttime = np.asarray(self._data[col_map[f"trtime{sfx}"]], dtype=np.float64)
+        mflags = np.asarray(self._data[col_map[f"mflags{sfx}"]], dtype=np.uint8)
+
+        extname = str(self._dhead.get("EXTNAME", "")).strip().upper()
+        self._is_hlsp = extname in _HLSP_EXTNAMES
+
+        if self._is_hlsp:
+            # k2mastify HLSP files store already-detrended flux:
+            # flux_hlsp = raw - (trposi - nanmean(trposi)) - (trtime - nanmean(trtime))
+            self._flux_residual = flux_col
+            self._flux_detrended = flux_col + _submean(self._ttime)
+            self._flux = self._flux_detrended + _submean(self._tposi)
+            self._minf = np.isfinite(flux_col) & np.isfinite(self._time)
+        else:
+            # Raw k2sc CLI output (EXTNAME='K2SC' or 'RESULTS') stores raw input flux
+            self._flux = flux_col
+            self._flux_detrended = self._flux - submed(self._tposi)
+            self._flux_residual = self._flux_detrended - submed(self._ttime)
+            self._minf = np.isfinite(self._flux) & np.isfinite(self._time)
+
         self._mper = ~(mflags & M_PERIODIC).astype(bool)
         self._ou = ~(mflags & M_OUTLIER_U).astype(bool)
         self._od = ~(mflags & M_OUTLIER_D).astype(bool)
@@ -58,7 +126,9 @@ class K2SCFile:
 
     def _n(self, a, remove_outliers=None):
         if self._normalize:
-            return self._clean(a / np.nanmedian(a), remove_outliers=remove_outliers)
+            fin = np.isfinite(a)
+            med = float(np.median(a[fin])) if np.any(fin) else np.nan
+            return self._clean(a / med, remove_outliers=remove_outliers)
         return self._clean(a, remove_outliers=remove_outliers)
 
     def _clean(self, a, remove_nans=None, remove_outliers=None):
@@ -83,24 +153,34 @@ class K2SCFile:
         self._remove_outliers = bool(v)
 
     @property
+    def is_hlsp(self) -> bool:
+        """True when the loaded extension is a ``k2mastify`` HLSP table (``PDC``/``SAP``)."""
+        return self._is_hlsp
+
+    @property
+    def aperture(self) -> int:
+        """1-based aperture index loaded from the FITS table."""
+        return self._aperture
+
+    @property
     def time(self):
         """Time array"""
         return self._clean(self._time)
 
     @property
     def original_flux(self):
-        """Original flux"""
+        """Original flux (reconstructed from trends on ``k2mastify`` HLSP files)"""
         return self._n(self._flux)
 
     @property
     def detrended_flux(self):
         """Flux with the position trend removed"""
-        return self._n(self._flux - submed(self._tposi))
+        return self._n(self._flux_detrended)
 
     @property
     def residual_flux(self):
         """Flux with both the position and time trends removed"""
-        return self._n(self._flux - submed(self._tposi) - submed(self._ttime))
+        return self._n(self._flux_residual)
 
     @property
     def position_trend(self):
@@ -140,9 +220,7 @@ class K2SCFile:
         """Time and detrended flux datapoints marked as outliers by K2SC"""
         return (
             self._clean(self._time, remove_outliers=False)[~self.outlier_mask],
-            self._n(self._flux - submed(self._tposi), remove_outliers=False)[
-                ~self.outlier_mask
-            ],
+            self._n(self._flux_detrended, remove_outliers=False)[~self.outlier_mask],
         )
 
     @property
