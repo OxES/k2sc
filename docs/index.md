@@ -38,12 +38,14 @@ lc = lk.search_lightcurve("EPIC 211436265", mission="K2", campaign=5).download()
 corr = K2SCCorrector(lc)
 clc = corr.correct(
     transit_mask=(2310.45, 3.30, 0.12),  # optional (t0, period, duration) in days
-    remove_time_trend=False,             # preserve stellar variability and transits
+    remove_time_trend=False,  # preserve stellar variability and transits
     optimizer="auto",
     seed=0,
 )
 
-print(f"CDPP: raw={corr.cdpp_r:.1f} ppm, pos-corrected={corr.cdpp_t:.1f} ppm, whitened={corr.cdpp_c:.1f} ppm")
+print(
+    f"CDPP: raw={corr.cdpp_r:.1f} ppm, pos-corrected={corr.cdpp_t:.1f} ppm, whitened={corr.cdpp_c:.1f} ppm"
+)
 pos_trend = clc["k2sc_tr_position"]
 time_trend = clc["k2sc_tr_time"]
 
@@ -61,7 +63,9 @@ For `TessLightCurve` inputs, `K2SCCorrector` automatically falls back from `pos_
 import lightkurve as lk
 from k2sc import K2SCCorrector
 
-tlc = lk.search_lightcurve("TIC 25155310", mission="TESS", sector=1, author="SPOC").download()
+tlc = lk.search_lightcurve(
+    "TIC 25155310", mission="TESS", sector=1, author="SPOC"
+).download()
 corr = K2SCCorrector(tlc)
 ctlc = corr.correct(splits="auto", optimizer="auto", seed=0)
 ```
@@ -80,7 +84,13 @@ rng = np.random.default_rng(0)
 time = np.linspace(0.0, 40.0, 600)
 x = 0.2 * ((time % 0.25) / 0.25 - 0.5)
 y = 0.15 * np.sin(2.0 * np.pi * time / 0.25)
-flux = 1000.0 * (1.0 + 0.003 * np.sin(2.0 * np.pi * time / 6.5) + 0.008 * x - 0.005 * y + rng.normal(0.0, 2e-4, time.size))
+flux = 1000.0 * (
+    1.0
+    + 0.003 * np.sin(2.0 * np.pi * time / 6.5)
+    + 0.008 * x
+    - 0.005 * y
+    + rng.normal(0.0, 2e-4, time.size)
+)
 
 res = k2sc.detrend(time, flux, x=x, y=y, splits=[20.0], optimizer="auto", seed=0)
 # Also dispatches directly on LightCurve instances:

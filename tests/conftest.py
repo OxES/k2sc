@@ -33,12 +33,18 @@ def canonical_gp_dataset() -> dict[str, object]:
     # Realistic 6-hour K2 roll-drift sawtooth plus slow secular drift
     roll_phase = ((t - 2300.0) / 0.25) % 1.0
     x = 0.28 * (roll_phase - 0.5) + 0.04 * np.sin(2.0 * np.pi * (t - 2300.0) / 40.0)
-    y_pos = -0.22 * (roll_phase - 0.5) + 0.03 * np.cos(2.0 * np.pi * (t - 2300.0) / 55.0)
+    y_pos = -0.22 * (roll_phase - 0.5) + 0.03 * np.cos(
+        2.0 * np.pi * (t - 2300.0) / 55.0
+    )
     X = np.column_stack([t, x, y_pos]).astype(np.float64)
 
     splits = [2326.0, 2354.0]
     seg = (t > splits[0]).astype(int) + (t > splits[1]).astype(int)
-    pos_sys = np.where(seg == 0, 8e-4 * x - 6e-4 * y_pos, np.where(seg == 1, -7e-4 * x + 5e-4 * y_pos, 6e-4 * (x + y_pos)))
+    pos_sys = np.where(
+        seg == 0,
+        8e-4 * x - 6e-4 * y_pos,
+        np.where(seg == 1, -7e-4 * x + 5e-4 * y_pos, 6e-4 * (x + y_pos)),
+    )
     astro = 1.5e-3 * np.sin(2.0 * np.pi * (t - 2300.0) / 7.3)
     y_flux = astro + pos_sys + rng.normal(0.0, 1.5e-4, size=n_total)
 

@@ -70,7 +70,9 @@ clc_masked = corr.correct(
 )
 
 # Inspect 6.5-hour CDPP metrics (ppm) before and after correction
-print(f"CDPP raw={corr.cdpp_r:.1f} ppm -> pos-corrected={corr.cdpp_t:.1f} ppm (whitened={corr.cdpp_c:.1f} ppm)")
+print(
+    f"CDPP raw={corr.cdpp_r:.1f} ppm -> pos-corrected={corr.cdpp_t:.1f} ppm (whitened={corr.cdpp_c:.1f} ppm)"
+)
 
 # Access separated GP trend components and quality/outlier bitmask columns
 pos_trend = clc["k2sc_tr_position"]
@@ -101,7 +103,9 @@ corr.diagnose_xy()
 import lightkurve as lk
 from k2sc import K2SCCorrector
 
-tlc = lk.search_lightcurve("TIC 25155310", mission="TESS", sector=1, author="SPOC").download()
+tlc = lk.search_lightcurve(
+    "TIC 25155310", mission="TESS", sector=1, author="SPOC"
+).download()
 
 # Automatically falls back to median-centred centroid_col / centroid_row when pos_corr is absent
 # and places a spatial-kernel split across the ~13.7 d mid-sector downlink gap (splits="auto")
@@ -129,7 +133,13 @@ rng = np.random.default_rng(0)
 time = np.linspace(0.0, 40.0, 600)
 x = 0.2 * ((time % 0.25) / 0.25 - 0.5)
 y = 0.15 * np.sin(2.0 * np.pi * time / 0.25)
-flux = 1000.0 * (1.0 + 0.003 * np.sin(2.0 * np.pi * time / 6.5) + 0.008 * x - 0.005 * y + rng.normal(0.0, 2e-4, time.size))
+flux = 1000.0 * (
+    1.0
+    + 0.003 * np.sin(2.0 * np.pi * time / 6.5)
+    + 0.008 * x
+    - 0.005 * y
+    + rng.normal(0.0, 2e-4, time.size)
+)
 
 res = k2sc.detrend(
     time,
