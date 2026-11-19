@@ -52,7 +52,9 @@ class DiffEvol:
         self.F = float(F)
         self.C = float(C)
 
-        self._population = self.bl + self._rng.random((self.n_pop, self.n_par)) * self.bw
+        self._population = (
+            self.bl + self._rng.random((self.n_pop, self.n_par)) * self.bw
+        )
         self._fitness = np.zeros(self.n_pop, dtype=np.float64)
         self._minidx: int | None = None
 

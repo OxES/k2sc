@@ -26,7 +26,9 @@ def piecewise_mask_numpy(t1: np.ndarray, t2: np.ndarray, splits=None) -> np.ndar
     return (seg1[:, None] == seg2[None, :]).astype(np.float64)
 
 
-def legacy_splitgp_mask_numpy(t1: np.ndarray, t2: np.ndarray, splits=None) -> np.ndarray:
+def legacy_splitgp_mask_numpy(
+    t1: np.ndarray, t2: np.ndarray, splits=None
+) -> np.ndarray:
     """Historical k2sc v1.0.2.2 SplitGP._get_mask (for golden provenance checks only)."""
     t1_arr = np.asarray(t1, dtype=np.float64).ravel()
     t2_arr = np.asarray(t2, dtype=np.float64).ravel()
@@ -80,39 +82,63 @@ def kernel_matrices_numpy(
     key = kernel_name.lower()
     if key in ("basickernel", "basic"):
         K1 = (10.0 ** p[0]) * np.exp(-0.5 * p[1] * (dt**2))
-        K2 = m_seg * (10.0 ** p[2]) * np.exp(-0.5 * p[3] * (dx**2) - 0.5 * p[4] * (dy**2))
+        K2 = (
+            m_seg
+            * (10.0 ** p[2])
+            * np.exp(-0.5 * p[3] * (dx**2) - 0.5 * p[4] * (dy**2))
+        )
         sigma_n_sq = float(10.0 ** (2.0 * p[5]))
         return K1, K2, sigma_n_sq
 
     if key in ("basickernelep", "basic_ep"):
         K1 = (10.0 ** p[0]) * np.exp(-0.5 * p[1] * (dt**2))
-        K2 = m_seg * (10.0 ** p[2]) * np.exp(-np.sqrt(p[3]) * np.abs(dx) - np.sqrt(p[4]) * np.abs(dy))
+        K2 = (
+            m_seg
+            * (10.0 ** p[2])
+            * np.exp(-np.sqrt(p[3]) * np.abs(dx) - np.sqrt(p[4]) * np.abs(dy))
+        )
         sigma_n_sq = float(10.0 ** (2.0 * p[5]))
         return K1, K2, sigma_n_sq
 
     if key in ("quasiperiodickernel", "quasiperiodic"):
         gamma = -np.log(p[1]) if legacy_george03_gamma else (1.0 / p[1])
         sin_arg = np.pi * np.abs(dt) / p[2]
-        K1 = (10.0 ** p[0]) * np.exp(-gamma * (np.sin(sin_arg) ** 2) - 0.5 * p[3] * (dt**2))
-        K2 = m_seg * (10.0 ** p[4]) * np.exp(-0.5 * p[5] * (dx**2) - 0.5 * p[6] * (dy**2))
+        K1 = (10.0 ** p[0]) * np.exp(
+            -gamma * (np.sin(sin_arg) ** 2) - 0.5 * p[3] * (dt**2)
+        )
+        K2 = (
+            m_seg
+            * (10.0 ** p[4])
+            * np.exp(-0.5 * p[5] * (dx**2) - 0.5 * p[6] * (dy**2))
+        )
         sigma_n_sq = float(10.0 ** (2.0 * p[7]))
         return K1, K2, sigma_n_sq
 
     if key in ("quasiperiodickernelep", "quasiperiodic_ep"):
         gamma = -np.log(p[1]) if legacy_george03_gamma else (1.0 / p[1])
         sin_arg = np.pi * np.abs(dt) / p[2]
-        K1 = (10.0 ** p[0]) * np.exp(-gamma * (np.sin(sin_arg) ** 2) - 0.5 * p[3] * (dt**2))
-        K2 = m_seg * (10.0 ** p[4]) * np.exp(-np.sqrt(p[5]) * np.abs(dx) - np.sqrt(p[6]) * np.abs(dy))
+        K1 = (10.0 ** p[0]) * np.exp(
+            -gamma * (np.sin(sin_arg) ** 2) - 0.5 * p[3] * (dt**2)
+        )
+        K2 = (
+            m_seg
+            * (10.0 ** p[4])
+            * np.exp(-np.sqrt(p[5]) * np.abs(dx) - np.sqrt(p[6]) * np.abs(dy))
+        )
         sigma_n_sq = float(10.0 ** (2.0 * p[7]))
         return K1, K2, sigma_n_sq
 
     if key in ("periodickernel", "periodic"):
         gamma = -np.log(p[1]) if legacy_george03_gamma else (1.0 / p[1])
         sin_arg = np.pi * np.abs(dt) / p[2]
-        K1 = (10.0 ** p[0]) * np.exp(-gamma * (np.sin(sin_arg) ** 2)) + (10.0 ** p[3]) * np.exp(
-            -0.5 * p[4] * (dt**2)
+        K1 = (10.0 ** p[0]) * np.exp(-gamma * (np.sin(sin_arg) ** 2)) + (
+            10.0 ** p[3]
+        ) * np.exp(-0.5 * p[4] * (dt**2))
+        K2 = (
+            m_seg
+            * (10.0 ** p[5])
+            * np.exp(-0.5 * p[6] * (dx**2) - 0.5 * p[7] * (dy**2))
         )
-        K2 = m_seg * (10.0 ** p[5]) * np.exp(-0.5 * p[6] * (dx**2) - 0.5 * p[7] * (dy**2))
         sigma_n_sq = float(10.0 ** (2.0 * p[8]))
         return K1, K2, sigma_n_sq
 
@@ -227,7 +253,9 @@ def gp_2x2_cramers_oracle(
     y = np.asarray(y_fit, dtype=np.float64)
     assert X_tr.shape[0] == 2 and y.shape == (2,)
 
-    K1, K2, sigma_n_sq = kernel_matrices_numpy(kernel_name, pv, X_tr, None, splits=splits)
+    K1, K2, sigma_n_sq = kernel_matrices_numpy(
+        kernel_name, pv, X_tr, None, splits=splits
+    )
     K = K1 + K2 + sigma_n_sq * np.eye(2, dtype=np.float64)
     det_k = float(K[0, 0] * K[1, 1] - K[0, 1] * K[1, 0])
     alpha = np.array(
@@ -237,5 +265,9 @@ def gp_2x2_cramers_oracle(
         ],
         dtype=np.float64,
     )
-    lnlike = -0.5 * float(np.dot(y, alpha)) - 0.5 * float(np.log(det_k)) - float(np.log(2.0 * np.pi))
+    lnlike = (
+        -0.5 * float(np.dot(y, alpha))
+        - 0.5 * float(np.log(det_k))
+        - float(np.log(2.0 * np.pi))
+    )
     return K, lnlike, alpha

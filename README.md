@@ -70,7 +70,9 @@ clc_masked = corr.correct(
 )
 
 # Inspect 6.5-hour CDPP metrics (ppm) before and after correction
-print(f"CDPP raw={corr.cdpp_r:.1f} ppm -> pos-corrected={corr.cdpp_t:.1f} ppm (whitened={corr.cdpp_c:.1f} ppm)")
+print(
+    f"CDPP raw={corr.cdpp_r:.1f} ppm -> pos-corrected={corr.cdpp_t:.1f} ppm (whitened={corr.cdpp_c:.1f} ppm)"
+)
 
 # Access separated GP trend components and quality/outlier bitmask columns
 pos_trend = clc["k2sc_tr_position"]
@@ -89,7 +91,7 @@ corr.diagnose_xy()
 - `clc["k2sc_tr_position"]`, `clc["k2sc_tr_time"]`: Posterior mean GP position and time trends in original flux units.
 - `clc["k2sc_corr_flux"]`, `clc["k2sc_detrended_flux"]`: Position-corrected and fully whitened flux series.
 - `clc["k2sc_mflags"]`: Bitmask (`uint8`) recording non-finite cadences, quality flags, sigma-clipped upward/downward outliers, and periodic transit masks.
-- `clc.meta`: Populated with `K2SC_KERNEL`, `K2SC_PV`, `K2SC_CDPP_R`, `K2SC_CDPP_T`, `K2SC_CDPP_C`, `K2SC_SPLITS`, `K2SC_PERIODIC`, `K2SC_LS_PERIOD`, `K2SC_LS_FAP`, `K2SC_COVARIATES`, and `K2SC_SUCCESS`.
+- `clc.meta`: Populated with `K2SC_KERNEL`, `K2SC_PV`, `K2SC_CDPP_R`, `K2SC_CDPP_T`, `K2SC_CDPP_C`, `K2SC_SPLITS`, `K2SC_PERIODIC`, `K2SC_LS_PERIOD`, `K2SC_LS_FAP`, `K2SC_COVARIATES`, `K2SC_SUCCESS`, `K2SC_ROLL_PCA`, `K2SC_PCA_CENTER`, `K2SC_PCA_ROTATION`, `K2SC_PCA_SCALES`, `K2SC_PCA_NSEGMENTS`, and `K2SC_SEGMENT_PCA`.
 
 ---
 
@@ -101,7 +103,9 @@ corr.diagnose_xy()
 import lightkurve as lk
 from k2sc import K2SCCorrector
 
-tlc = lk.search_lightcurve("TIC 25155310", mission="TESS", sector=1, author="SPOC").download()
+tlc = lk.search_lightcurve(
+    "TIC 25155310", mission="TESS", sector=1, author="SPOC"
+).download()
 
 # Automatically falls back to median-centred centroid_col / centroid_row when pos_corr is absent
 # and places a spatial-kernel split across the ~13.7 d mid-sector downlink gap (splits="auto")
@@ -129,7 +133,13 @@ rng = np.random.default_rng(0)
 time = np.linspace(0.0, 40.0, 600)
 x = 0.2 * ((time % 0.25) / 0.25 - 0.5)
 y = 0.15 * np.sin(2.0 * np.pi * time / 0.25)
-flux = 1000.0 * (1.0 + 0.003 * np.sin(2.0 * np.pi * time / 6.5) + 0.008 * x - 0.005 * y + rng.normal(0.0, 2e-4, time.size))
+flux = 1000.0 * (
+    1.0
+    + 0.003 * np.sin(2.0 * np.pi * time / 6.5)
+    + 0.008 * x
+    - 0.005 * y
+    + rng.normal(0.0, 2e-4, time.size)
+)
 
 res = k2sc.detrend(
     time,
@@ -137,6 +147,7 @@ res = k2sc.detrend(
     x=x,
     y=y,
     splits=[20.0],
+    roll_pca=True,  # default; set False to fit in raw (x, y) detector coordinates
     optimizer="auto",
     seed=0,
 )
@@ -146,7 +157,7 @@ print(res.corr_flux.shape, res.cdpp_r, res.cdpp_t, res.cdpp_c, res.is_periodic)
 # clc = k2sc.detrend(lc, transit_mask=(t0, period, duration), seed=0)
 ```
 
-`K2SCResult` exposes rich structured attributes (`detrender`, `pv`, `tr_time`, `tr_position`, `corr_flux`, `detrended_flux`, `cdpp_r`, `cdpp_t`, `cdpp_c`, `mflags`, `outlier_mask`, `splits`, `is_periodic`, `ls_period`, `ls_fap`, `opt_result`, `success`, `warn`) while supporting legacy 8-tuple unpacking `(detrender, pv, tr_time, tr_position, cdpp_r, cdpp_t, cdpp_c, warn)`.
+`K2SCResult` exposes rich structured attributes (`detrender`, `pv`, `tr_time`, `tr_position`, `corr_flux`, `detrended_flux`, `cdpp_r`, `cdpp_t`, `cdpp_c`, `mflags`, `outlier_mask`, `splits`, `is_periodic`, `ls_period`, `ls_fap`, `pca_transform`, `segment_pca_transforms`, `opt_result`, `success`, `warn`) while supporting legacy 8-tuple unpacking `(detrender, pv, tr_time, tr_position, cdpp_r, cdpp_t, cdpp_c, warn)`.
 
 ---
 
@@ -159,6 +170,8 @@ All entry points (`K2SCCorrector.correct`, `k2sc.detrend`, `Detrender.optimize`,
 | **`MultiStartLBFGSBOptimizer`** *(default)* | `"auto"` or `"multistart"` | Deterministic $M = 256$ design (`pv0` + scrambled Sobol quasi-random points + prior/harmonic-stratified draws at $\{P_{\mathrm{LS}}, \tfrac{1}{2}P_{\mathrm{LS}}, 2P_{\mathrm{LS}}\}$), screened in static-shape chunks (`jax.lax.map` on CPU, `jax.vmap` on GPU/TPU) over precomputed coordinate/split tensors and polished across the top $K = 5$ diverse basins via bounded SciPy `L-BFGS-B` using exact analytic Cholesky sensitivity gradients (~0.8–2.5 s/star on CPU). |
 | **`VectorizedDEOptimizer`** | `"de"` | Vectorized SciPy Differential Evolution (`vectorized=True`, `updating="deferred"`) evaluating entire generations in static-shape `jax.lax.map` / `jax.vmap` chunks (`--de-npop`, `--de-niter`, `--de-max-time`, early stopping when $\mathrm{ptp}(\text{energies}) < 3.0$), followed by top-3 exact-gradient `L-BFGS-B` polish. |
 | **`OptimistixOptimizer`** | `"optimistix"` | Pure-JAX `optimistix.BFGS` (`jax.vmap`-batched across top-$K$ diverse seeds) over smooth logit/sigmoid unconstrained coordinates without Jacobian mode-shift bias (requires `pip install "k2sc[optimistix]"`). |
+
+> **Multiprocessing & MPI Thread Hygiene:** When running many parallel Python worker processes or `mpirun` ranks on CPU, call `k2sc.configure_single_thread_env()` before importing `numpy` or `jax` to pin BLAS, OpenMP, and XLA CPU Eigen threads to `1` per worker (`--xla_cpu_multi_thread_eigen=false`), preventing thread oversubscription. The `k2sc` CLI invokes this automatically under multi-rank MPI.
 
 ---
 
@@ -187,6 +200,7 @@ mpirun -n 8 k2sc @targets.txt -c 5 --optimizer auto --save-dir ./out --logfile k
 - `--de-npop N`, `--de-niter G`, `--de-max-time SEC`: Differential Evolution population, generation, and wall-time budgets (`--optimizer de`).
 - `--kernel {basic,basic_ep,periodic,quasiperiodic,quasiperiodic_ep}` and `--kernel-period P`: Explicit GP kernel override.
 - `--default-position-kernel {SqrExp,Exp}`: Default 2D spatial kernel family (`SqrExp` default).
+- `--no-roll-pca`: Disable spacecraft-roll PCA coordinate rotation and $4\sigma_{\mathrm{MAD}}$ normalization, fitting the spatial GP directly in raw `(x, y)` detector coordinates.
 - `--p-mask-center T0`, `--p-mask-period P`, `--p-mask-duration DUR`: Periodic transit ephemeris mask (days).
 - `--ls-max-fap LOG10_FAP`, `--ls-min-period P_MIN`, `--ls-max-period P_MAX`: Lomb–Scargle periodicity selection thresholds (default `--ls-max-fap -50.0`, i.e. $\mathrm{FAP} < 10^{-50}$).
 - `--outlier-sigma SIGMA`, `--outlier-mwidth W`: Iterative running-median sigma-clipping parameters (`5.0`, `25`).
@@ -208,18 +222,29 @@ mpirun -n 8 k2sc @targets.txt -c 5 --optimizer auto --save-dir ./out --logfile k
   k2mastify ./out_pdc ./out_sap ./hlsp_out --release-version 2
   ```
 
+### CLI FITS Output Columns (`k2sc` vs `k2mastify`)
+
+The `k2sc` CLI and `k2mastify` follow two intentionally distinct FITS table conventions (clarifying upstream issue 9):
+
+- **`k2sc` CLI outputs (`EXTNAME='K2SC'`):** The `flux` column (or `flux_1`, `flux_2`, ... for multi-aperture `AMC`/`SPLOX` inputs) stores the **raw input flux** unchanged, alongside the fitted GP components `trposi` and `trtime` and physical detector coordinates `(x, y)`. Form position-corrected and fully whitened light curves as:
+  - `corr_flux = flux - trposi + nanmedian(trposi)`
+  - `detrended_flux = flux - trposi - trtime + nanmedian(trposi) + nanmedian(trtime)`
+  The `K2SC` extension header also records `ROLL_PCA` and `PCA_CX`, `PCA_CY`, `PCA_R11`..`PCA_R22`, `PCA_S1`, `PCA_S2` for full provenance of the spatial PCA frame.
+- **`k2mastify` HLSP outputs (`EXTNAME='PDC'` and `EXTNAME='SAP'`):** For compatibility with the archival MAST K2SC High-Level Science Products, `flux` is **already fully detrended** (`flux = raw_flux - trposi + nanmean(trposi) - trtime + nanmean(trtime)`), while `trposi` and `trtime` are retained for reference and reconstruction (position-only corrected flux is `flux + trtime - nanmean(trtime)` and raw flux is `flux + trposi - nanmean(trposi) + trtime - nanmean(trtime)`). `K2SCFile` and `k2plot` detect `EXTNAME in ('PDC', 'SAP')` automatically so HLSP files are never double-detrended.
+
 ---
 
 ## Mathematical Summary of the GP Model
 
-`k2sc` models normalized relative flux $y_i = F_i / \mathrm{median}(F) - 1$ at coordinates $\mathbf{x}_i = (t_i, x_i, y_i) \in \mathbb{R}^3$ as the sum of an astrophysical time kernel $k_{\mathrm{time}}(t, t')$, a piecewise-segmented 2D pointing-drift kernel $k_{\mathrm{pos}}(x, y, t; x', y', t')$, and white noise $\sigma_n^2 = 10^{2 p_{-1}}$:
+`k2sc` models normalized relative flux $y_i = F_i / \mathrm{median}(F) - 1$ at coordinates $\mathbf{x}_i = (t_i, \tilde{u}_{1,i}, \tilde{u}_{2,i}) \in \mathbb{R}^3$ as the sum of an astrophysical time kernel $k_{\mathrm{time}}(t, t')$, a piecewise-segmented 2D pointing-drift kernel $k_{\mathrm{pos}}(\tilde{u}_1, \tilde{u}_2, t; \tilde{u}_1', \tilde{u}_2', t')$, and white noise $\sigma_n^2 = 10^{2 p_{-1}}$:
 
-$$K_{ij} = k_{\mathrm{time}}(t_i, t_j) + M_{\mathrm{seg}}(t_i, t_j; \mathbf{s})\,k_{xy}(x_i, y_i; x_j, y_j) + \sigma_n^2\,\delta_{ij}.$$
+$$K_{ij} = k_{\mathrm{time}}(t_i, t_j) + M_{\mathrm{seg}}(t_i, t_j; \mathbf{s})\,k_{xy}(\tilde{u}_{1,i}, \tilde{u}_{2,i}; \tilde{u}_{1,j}, \tilde{u}_{2,j}) + \sigma_n^2\,\delta_{ij}.$$
 
+- **Spacecraft-Roll PCA Normalization (`k2sc.pca`, `roll_pca=True` default):** Because K2 `(POS_CORR1, POS_CORR2)` centroids trace a narrow spacecraft roll arc while orthogonal thermal/focus drift spans millipixels, `k2sc` rotates `(x, y)` into a right-handed $\mathrm{SO}(2)$ roll frame (seeded from the 2D $L_1$ spatial median and spherical PCA, refined with iterative $5\sigma$ principal-axis trimming, and recentred on the trimmed principal-axis medians $(\mu_x, \mu_y)$) and normalizes each axis by $s_k = 4\sigma_{\mathrm{MAD}}(u_k)$ so $[-2\sigma_k, +2\sigma_k] \mapsto [-0.5, +0.5]$. When `splits` is non-empty (e.g. K2 roll-reversal breakpoints or stitched multi-sector TESS light curves with large inter-sector CCD jumps), `k2sc` fits an independent `RollPCATransform` per split segment (for segments with $\ge 20$ clean finite cadences, falling back to segment-median-centred global rotation and scales on sparser segments) so every segment's active roll and cross-roll spans map to $[-0.5, +0.5]$ under shared spatial length-scales; for single-segment data (`splits=[]`), this reduces identically to a single global `RollPCATransform`. Pass `roll_pca=False` (or `--no-roll-pca` on the CLI) to fit in raw `(x, y)` coordinates. The primary transform and per-segment transforms are exposed on `K2SCResult.pca_transform` and `K2SCResult.segment_pca_transforms`, recorded in `LightCurve.meta` (`K2SC_ROLL_PCA`, `K2SC_PCA_CENTER`, `K2SC_PCA_ROTATION`, `K2SC_PCA_SCALES`, `K2SC_PCA_NSEGMENTS`, `K2SC_SEGMENT_PCA`), and written to the `K2SC` FITS header (`ROLL_PCA`, `PCA_CX`, `PCA_CY`, `PCA_R11`..`PCA_R22`, `PCA_S1`, `PCA_S2`) while leaving physical `(x, y)` columns untouched.
 - **Piecewise Spatial Segmentation (`SplitGP` & `PiecewiseSpatialKernel`):** Roll-angle drift reversals at timestamps $\mathbf{s} = (s_1, \dots, s_K)$ partition the light curve into segments $c(t) = \sum_{k=1}^K \mathbb{I}(t > s_k)$ with $M_{\mathrm{seg}}(t, t'; \mathbf{s}) = \mathbb{I}(c(t) = c(t'))$. Because $M_{\mathrm{seg}}$ is a sum of outer-product indicator matrices, `PiecewiseSpatialKernel` is guaranteed positive semidefinite by the Schur product theorem across arbitrary training/prediction masks ($N \neq M$).
 - **Temporal Kernels:** Smooth variability uses `ExpSquared` ($10^{p_0}\exp[-\tfrac{1}{2}p_1 \Delta t^2]$), while rotational spot modulation (`QuasiPeriodicKernel`, `QuasiPeriodicKernelEP`, `PeriodicKernel`) uses the strictly positive-semidefinite harmonic complexity parameterization $\Gamma(p_1) = 1/p_1 > 0$ on $p_1 \in (0, 2]$:
   $$k_{\mathrm{QP}}(t, t') = 10^{p_0}\exp\!\left(-\frac{1}{p_1}\sin^2\!\left(\frac{\pi |t - t'|}{p_2}\right) - \frac{p_3}{2}(t - t')^2\right).$$
-- **Autodiff-Safe $L_1$ Kernels (`SafeL1Distance`):** Exponential spatial kernels (`BasicKernelEP`, `QuasiPeriodicKernelEP`: $10^{p_{\mathrm{xy}}}\exp(-\sqrt{p_x}|\Delta x| - \sqrt{p_y}|\Delta y|)$) and `ExpSineSquared` evaluate $|u - u'|$ via a double-`jnp.where` metric (`SafeL1Distance`), yielding exact zero distance and finite zero reverse-mode derivatives (never `0/0 = NaN`) at zero lag and duplicate centroids.
+- **Autodiff-Safe $L_1$ Kernels (`SafeL1Distance`):** Exponential spatial kernels (`BasicKernelEP`, `QuasiPeriodicKernelEP`: $10^{p_{\mathrm{xy}}}\exp(-\sqrt{p_x}|\Delta \tilde{u}_1| - \sqrt{p_y}|\Delta \tilde{u}_2|)$) and `ExpSineSquared` evaluate $|u - u'|$ via a double-`jnp.where` metric (`SafeL1Distance`), yielding exact zero distance and finite zero reverse-mode derivatives (never `0/0 = NaN`) at zero lag and duplicate centroids.
 - **Posterior Component Separation:** Conditioning the factored Cholesky matrix $L$ ($K = L L^\top$, $\boldsymbol{\alpha} = K^{-1}\mathbf{y}$) separately on $k_{\mathrm{time}}$ and $k_{\mathrm{pos}}$ yields physical-flux trends $T_{\mathrm{time}}$ and $T_{\mathrm{pos}}$, from which `k2sc` forms position-corrected flux $F_{\mathrm{corr}} = F - (T_{\mathrm{pos}} - \mathrm{nanmedian}(T_{\mathrm{pos}}))$ and fully whitened flux $F_{\mathrm{detrended}} = F_{\mathrm{corr}} - (T_{\mathrm{time}} - \mathrm{nanmedian}(T_{\mathrm{time}}))$.
 
 ---

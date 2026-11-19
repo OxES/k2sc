@@ -88,7 +88,9 @@ class K2Data:
         self.raw_y = np.asarray(y, dtype=np.float64).copy()
 
         self.nanmask = nm = (
-            np.isfinite(self.raw_time) & np.isfinite(self.raw_x) & np.isfinite(self.raw_y)
+            np.isfinite(self.raw_time)
+            & np.isfinite(self.raw_x)
+            & np.isfinite(self.raw_y)
         )
         self.time = np.extract(nm, self.raw_time)
         self.cadence = np.extract(nm, self.raw_cadence).astype(np.int32)
@@ -113,6 +115,8 @@ class K2Data:
         self.mflags[:, ~qmask] |= M_QUALITY
 
     def mask_periodic_signal(self, center, period, duration):
-        folded = np.asarray(fold(self.time, period, center, shift=0.5), dtype=np.float64)
+        folded = np.asarray(
+            fold(self.time, period, center, shift=0.5), dtype=np.float64
+        )
         self.pmask = np.abs(folded - 0.5) * period > 0.5 * duration
         self.mflags[:, ~self.pmask] |= M_PERIODIC

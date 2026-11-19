@@ -15,7 +15,9 @@ from k2sc.pipeline import resolve_splits
 from k2sc.utils import medsig, sigma_clip
 
 
-def normalize_flux(values: np.ndarray, reference: np.ndarray | None = None) -> np.ndarray:
+def normalize_flux(
+    values: np.ndarray, reference: np.ndarray | None = None
+) -> np.ndarray:
     """Normalize a flux array by the finite median of ``reference`` (or ``values``)."""
     ref = values if reference is None else reference
     return values / float(np.nanmedian(ref))
@@ -78,7 +80,9 @@ def run_opdetection(
     ax[2].grid(axis="y", alpha=0.4)
     ax[2].set_ylabel(r"Normalized flux [$\sigma$]")
 
-    ax[3].plot(time[mask], normalize_flux(pos_corr[mask], flux), lw=0.9, label="Inliers")
+    ax[3].plot(
+        time[mask], normalize_flux(pos_corr[mask], flux), lw=0.9, label="Inliers"
+    )
     if np.any(~mask):
         ax[3].plot(
             time[~mask],
@@ -96,8 +100,16 @@ def run_opdetection(
     poly_deg = min(9, max(1, int(mask.sum()) // 10))
     baseline = np.polynomial.Legendre.fit(ntime[mask], nflux[mask], deg=poly_deg)(ntime)
     resid = nflux - baseline
-    ax[4].plot(time[mask], normalize_flux(nflux[mask]), lw=0.8, label="Position-corrected")
-    ax[4].plot(time, normalize_flux(baseline, nflux[mask]), "k-", lw=1.3, label="Legendre baseline")
+    ax[4].plot(
+        time[mask], normalize_flux(nflux[mask]), lw=0.8, label="Position-corrected"
+    )
+    ax[4].plot(
+        time,
+        normalize_flux(baseline, nflux[mask]),
+        "k-",
+        lw=1.3,
+        label="Legendre baseline",
+    )
     ax[4].set_ylabel("Normalized flux")
     ax[4].set_xlabel("Time [BKJD]")
     ax[4].legend(loc="best", fontsize=9)
@@ -123,7 +135,9 @@ def run_opdetection(
     best_period = float(period[j])
     best_power = float(power[j])
     best_fap = float(fap[j])
-    print(f"Best period: {best_period:.5f} d | LS power: {best_power:.2f} | FAP: {best_fap:.3e}")
+    print(
+        f"Best period: {best_period:.5f} d | LS power: {best_power:.2f} | FAP: {best_fap:.3e}"
+    )
 
     if output is not None:
         fig.savefig(output, dpi=150)

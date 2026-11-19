@@ -23,7 +23,9 @@ def __getattr__(attr: str):
             from . import pipeline
         except ModuleNotFoundError as exc:
             if exc.name == f"{__name__}.pipeline":
-                raise AttributeError(f"module {__name__!r} has no attribute {attr!r}") from exc
+                raise AttributeError(
+                    f"module {__name__!r} has no attribute {attr!r}"
+                ) from exc
             raise
         return getattr(pipeline, attr)
     if attr == "K2SCCorrector":
@@ -31,7 +33,9 @@ def __getattr__(attr: str):
             from . import corrector
         except ModuleNotFoundError as exc:
             if exc.name == f"{__name__}.corrector":
-                raise AttributeError(f"module {__name__!r} has no attribute {attr!r}") from exc
+                raise AttributeError(
+                    f"module {__name__!r} has no attribute {attr!r}"
+                ) from exc
             raise
         return corrector.K2SCCorrector
     raise AttributeError(f"module {__name__!r} has no attribute {attr!r}")
