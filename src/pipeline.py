@@ -36,7 +36,7 @@ from .kernels import (
 )
 from .ls import fasper
 from .optimizers import OptimizationResult
-from .pca import RollPCATransform, pca_normalize_xy
+from .pca import _MAD_TO_SIGMA, RollPCATransform, pca_normalize_xy
 from .utils import fold, sigma_clip
 
 ensure_float64()
@@ -87,6 +87,7 @@ class K2SCResult:
     opt_result: OptimizationResult | None
     lightcurve: Any | None = None
     pca_transform: RollPCATransform | None = None
+    segment_pca_transforms: tuple[RollPCATransform, ...] | None = None
 
     def _legacy_tuple(self) -> tuple[Any, ...]:
         return (
@@ -209,6 +210,7 @@ def _coerce_covariates(
     x=None,
     y=None,
     covariates=None,
+    clean_mask=None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Validate and map 2D/D_c-dimensional covariates onto (valid_coords_xy, x_2d, y_2d)."""
     if covariates is not None and (x is not None or y is not None):
@@ -232,28 +234,67 @@ def _coerce_covariates(
         if d_c == 2:
             return valid_xy, cov_arr[:, 0].copy(), cov_arr[:, 1].copy()
 
-        # D_c > 2: drop constant intercept columns, then project >2 non-constant
-        # columns onto their dominant 2 orthogonal singular axes so the 2D spatial
-        # kernel incorporates variance across all supplied covariates.
+        # D_c > 2: fit robust centres (median) and scales (1.4826 * MAD, std
+        # fallback, 1.0 if constant) on clean rows only, drop constant columns,
+        # and project all valid rows onto the top 2 deterministic right singular
+        # vectors so thruster flyers or disparate column units cannot hijack the
+        # 2D spatial subspace.
         x_out = np.full(n_pts, np.nan, dtype=np.float64)
         y_out = np.full(n_pts, np.nan, dtype=np.float64)
         if int(valid_xy.sum()) == 0:
             return valid_xy, x_out, y_out
 
-        sub = cov_arr[valid_xy]
-        stds = np.std(sub, axis=0)
-        non_const = stds > 0.0
-        sub_nc = sub[:, non_const] if np.any(non_const) else sub
-        if sub_nc.shape[1] == 1:
-            x_out[valid_xy] = sub_nc[:, 0]
-            y_out[valid_xy] = 0.0
-        elif sub_nc.shape[1] == 2:
-            x_out[valid_xy] = sub_nc[:, 0]
-            y_out[valid_xy] = sub_nc[:, 1]
+        if clean_mask is not None:
+            cm = np.asarray(clean_mask, dtype=bool).ravel()
+            if cm.size != n_pts:
+                raise ValueError(
+                    f"clean_mask length ({cm.size}) != input length ({n_pts})."
+                )
+            clean_valid = valid_xy & cm
+            fit_rows = clean_valid if int(clean_valid.sum()) >= 3 else valid_xy
         else:
-            centred = sub_nc - np.median(sub_nc, axis=0, keepdims=True)
-            _u, _s, vt = np.linalg.svd(centred, full_matrices=False)
-            proj = centred @ vt[:2].T
+            fit_rows = valid_xy
+
+        sub_fit = cov_arr[fit_rows]
+        sub_all = cov_arr[valid_xy]
+
+        medians = np.median(sub_fit, axis=0)
+        mad_sigmas = _MAD_TO_SIGMA * np.median(
+            np.abs(sub_fit - medians[None, :]), axis=0
+        )
+        stds = np.std(sub_fit, axis=0)
+        ptps = np.ptp(sub_fit, axis=0)
+        col_tol = (
+            64.0 * float(np.finfo(np.float64).eps) * np.maximum(1.0, np.abs(medians))
+        )
+        non_const = (ptps > col_tol) & ((mad_sigmas > col_tol) | (stds > col_tol))
+        active_cols = np.flatnonzero(non_const) if np.any(non_const) else np.arange(d_c)
+
+        if active_cols.size == 1:
+            x_out[valid_xy] = sub_all[:, active_cols[0]]
+            y_out[valid_xy] = 0.0
+        elif active_cols.size == 2:
+            x_out[valid_xy] = sub_all[:, active_cols[0]]
+            y_out[valid_xy] = sub_all[:, active_cols[1]]
+        else:
+            scales = np.where(
+                mad_sigmas > col_tol,
+                mad_sigmas,
+                np.where(stds > col_tol, stds, 1.0),
+            )
+            c_act = medians[active_cols]
+            s_act = scales[active_cols]
+            z_fit = (sub_fit[:, active_cols] - c_act[None, :]) / s_act[None, :]
+            z_all = (sub_all[:, active_cols] - c_act[None, :]) / s_act[None, :]
+            _u, _s, vt = np.linalg.svd(z_fit, full_matrices=False)
+            n_comp = min(2, vt.shape[0])
+            basis = np.zeros((2, active_cols.size), dtype=np.float64)
+            basis[:n_comp] = vt[:n_comp]
+            for r in range(n_comp):
+                idx_max = int(np.argmax(np.abs(basis[r])))
+                if basis[r, idx_max] < 0.0:
+                    basis[r] = -basis[r]
+            proj = z_all @ basis.T
             x_out[valid_xy] = proj[:, 0]
             y_out[valid_xy] = proj[:, 1]
         return valid_xy, x_out, y_out
@@ -310,7 +351,9 @@ def _run_ls_period_search(
         return None, None, None
 
     periods = np.where(valid_f, 1.0 / np.where(valid_f, freq, 1.0), np.inf)
-    in_window = valid_f & (periods > float(ls_min_period)) & (periods < float(ls_max_period))
+    in_window = (
+        valid_f & (periods > float(ls_min_period)) & (periods < float(ls_max_period))
+    )
     if not np.any(in_window):
         return None, None, None
 
@@ -361,13 +404,17 @@ def _instantiate_kernel(
         return kernels[canonical]()
 
     if kernel is not None:
-        raise TypeError(f"Expected kernel to be str, DtKernel, or None; got {type(kernel)!r}.")
+        raise TypeError(
+            f"Expected kernel to be str, DtKernel, or None; got {type(kernel)!r}."
+        )
 
     pos_key = default_position_kernel.strip().lower()
     if pos_key == "sqrexp":
         return QuasiPeriodicKernel(period=ls_period) if is_periodic else BasicKernel()
     if pos_key == "exp":
-        return QuasiPeriodicKernelEP(period=ls_period) if is_periodic else BasicKernelEP()
+        return (
+            QuasiPeriodicKernelEP(period=ls_period) if is_periodic else BasicKernelEP()
+        )
     raise ValueError(
         f"Unknown default_position_kernel {default_position_kernel!r}; expected 'SqrExp' or 'Exp'."
     )
@@ -383,8 +430,12 @@ def _compute_periodic_transit_mask(
     per = float(period)
     dur = float(duration)
     if per <= 0.0 or dur < 0.0:
-        raise ValueError(f"Transit period must be > 0 and duration >= 0 (got {per}, {dur}).")
-    folded = np.asarray(fold(time_valid, per, float(center), shift=0.5), dtype=np.float64)
+        raise ValueError(
+            f"Transit period must be > 0 and duration >= 0 (got {per}, {dur})."
+        )
+    folded = np.asarray(
+        fold(time_valid, per, float(center), shift=0.5), dtype=np.float64
+    )
     return np.abs(folded - 0.5) * per <= 0.5 * dur
 
 
@@ -423,13 +474,7 @@ def _initial_outlier_and_period_pass(
         seed=seed,
     )
     ttrend, ptrend = det_init.predict(det_init.kernel.pv0, components=True)
-    cflux = (
-        flux_v
-        - ptrend
-        + np.nanmedian(ptrend)
-        - ttrend
-        + np.nanmedian(ttrend)
-    )
+    cflux = flux_v - ptrend + np.nanmedian(ptrend) - ttrend + np.nanmedian(ttrend)
     cflux_med = float(np.nanmedian(cflux))
     if np.isfinite(cflux_med) and cflux_med != 0.0:
         cflux = cflux / cflux_med
@@ -447,7 +492,9 @@ def _initial_outlier_and_period_pass(
     if ofrac < 0.25:
         mask_v &= omask
         if not quiet:
-            log.info("  Flagged %i (%4.1f%%) outliers.", int((~omask).sum()), 100.0 * ofrac)
+            log.info(
+                "  Flagged %i (%4.1f%%) outliers.", int((~omask).sum()), 100.0 * ofrac
+            )
     elif not quiet:
         log.info(
             "  Found %i (%4.1f%%) outliers. Not flagging.",
@@ -457,20 +504,32 @@ def _initial_outlier_and_period_pass(
 
     if ofrac >= 0.9 or int(mask_v.sum()) < _MIN_FINITE_POINTS:
         if not quiet:
-            log.info("Too many outliers or too few points, skipping Lomb-Scargle period search")
+            log.info(
+                "Too many outliers or too few points, skipping Lomb-Scargle period search"
+            )
         return mask_v, None, None, None
 
     if not quiet:
         log.info("Starting Lomb-Scargle period search")
     nflux = flux_v - ptrend + np.nanmedian(ptrend)
-    ntime = time_v - float(np.mean(time_v[mask_v]))
-    deg = min(9, max(1, int(mask_v.sum()) // 10))
-    pflux = np.polynomial.Legendre.fit(ntime[mask_v], nflux[mask_v], deg=deg)(ntime)
+    fin_ls = mask_v & np.isfinite(time_v) & np.isfinite(nflux)
+    if int(fin_ls.sum()) < _MIN_FINITE_POINTS:
+        return mask_v, None, None, None
+
+    ntime = time_v - float(np.mean(time_v[fin_ls]))
+    t_clean = ntime[fin_ls]
+    t_span = float(np.ptp(t_clean))
+    n_unique = int(np.unique(t_clean).size)
+    if not np.isfinite(t_span) or t_span <= 0.0 or n_unique < 2:
+        return mask_v, None, None, None
+
+    deg = min(9, max(1, int(fin_ls.sum()) // 10), n_unique - 1)
+    pflux = np.polynomial.Legendre.fit(t_clean, nflux[fin_ls], deg=deg)(ntime)
     resid = nflux - pflux
 
     period, power, fap = _run_ls_period_search(
-        time_v[mask_v],
-        resid[mask_v],
+        time_v[fin_ls],
+        resid[fin_ls],
         ls_min_period=ls_min_period,
         ls_max_period=ls_max_period,
     )
@@ -526,11 +585,8 @@ def _fit_single_aperture_valid(
     extra_opt = dict(optimizer_kwargs) if optimizer_kwargs is not None else {}
 
     n_valid = flux_v.size
-    if n_valid == 0:
-        raise ValueError("No finite (time, x, y) coordinates available for GP detrending.")
-
     safe_mask = fit_mask_v if np.any(fit_mask_v) else np.isfinite(flux_v)
-    if not np.any(safe_mask):
+    if n_valid > 0 and not np.any(safe_mask):
         safe_mask = np.ones(n_valid, dtype=bool)
 
     detrender = Detrender(
@@ -548,7 +604,9 @@ def _fit_single_aperture_valid(
     n_fit = int(np.count_nonzero(fit_mask_v & np.isfinite(flux_v)))
     if n_fit < _MIN_FINITE_POINTS:
         if not quiet:
-            log.info("Skipping dataset %i, not enough finite datapoints (%i)", iset, n_fit)
+            log.info(
+                "Skipping dataset %i, not enough finite datapoints (%i)", iset, n_fit
+            )
         pv = np.full(kernel_inst.npar, np.nan, dtype=np.float64)
         detrender.tr_pv = pv.copy()
         nan_arr = np.full(n_valid, np.nan, dtype=np.float64)
@@ -625,7 +683,13 @@ def _fit_single_aperture_valid(
         log.info("  %5i not finite", int((~minf_v).sum()))
 
     dd = detrender.data
-    if dd.masked_time.size >= 3:
+    mt_sorted = np.sort(dd.masked_time[np.isfinite(dd.masked_time)])
+    has_positive_cadence = (
+        mt_sorted.size >= 3
+        and float(mt_sorted[-1] - mt_sorted[0]) > 0.0
+        and float(np.median(np.diff(mt_sorted))) > 0.0
+    )
+    if has_positive_cadence:
         cdpp_r = float(cdpp(dd.masked_time, dd.masked_flux))
         cdpp_t = float(cdpp(dd.unmasked_time, corr_v, exclude=~dd.mask))
         cdpp_c = float(cdpp(dd.unmasked_time, detr_v, exclude=~dd.mask))
@@ -709,11 +773,6 @@ def detrend_array(
     if n_full == 0:
         raise ValueError("Input time and flux arrays must be non-empty.")
 
-    valid_xy, x_full, y_full = _coerce_covariates(
-        n_full, x=x, y=y, covariates=covariates
-    )
-    valid_coords = np.isfinite(time_full) & valid_xy
-
     if initial_mflags is not None:
         mflags_full = np.asarray(initial_mflags, dtype=np.uint8).ravel().copy()
         if mflags_full.size != n_full:
@@ -741,6 +800,27 @@ def detrend_array(
         else:
             q_fit_full &= (q_int & _K2_THRUSTER_FLAG) == 0
 
+    cmask_full = np.ones(n_full, dtype=bool)
+    if cadence_mask is not None:
+        cmask_arr = np.asarray(cadence_mask, dtype=bool).ravel()
+        if cmask_arr.size != n_full:
+            raise ValueError(
+                f"cadence_mask length ({cmask_arr.size}) != input length ({n_full})."
+            )
+        cmask_full &= cmask_arr
+
+    clean_cov_mask = (
+        np.isfinite(time_full) & np.isfinite(flux_full) & q_fit_full & cmask_full
+    )
+    valid_xy, x_full, y_full = _coerce_covariates(
+        n_full,
+        x=x,
+        y=y,
+        covariates=covariates,
+        clean_mask=clean_cov_mask,
+    )
+    valid_coords = np.isfinite(time_full) & valid_xy
+
     mflags_full[~np.isfinite(flux_full)] |= M_NOTFINITE
     mflags_full[~valid_coords] |= M_NOTFINITE
 
@@ -762,8 +842,7 @@ def detrend_array(
 
     if transit_mask is not None:
         is_tuple_spec = isinstance(transit_mask, (tuple, list)) and (
-            len(transit_mask) == 3
-            and not isinstance(transit_mask[0], (bool, np.bool_))
+            len(transit_mask) == 3 and not isinstance(transit_mask[0], (bool, np.bool_))
         )
         if is_tuple_spec:
             if np.any(valid_coords):
@@ -784,23 +863,23 @@ def detrend_array(
                 )
             mflags_full[tmask_bool] |= M_PERIODIC
 
-    cmask_full = np.ones(n_full, dtype=bool)
-    if cadence_mask is not None:
-        cmask_arr = np.asarray(cadence_mask, dtype=bool).ravel()
-        if cmask_arr.size != n_full:
-            raise ValueError(
-                f"cadence_mask length ({cmask_arr.size}) != input length ({n_full})."
-            )
-        cmask_full &= cmask_arr
-
-    if not np.any(valid_coords):
-        raise ValueError("No cadences with simultaneously finite time and spatial covariates.")
+    time_v = time_full[valid_coords]
+    flux_v = flux_full[valid_coords]
+    splits_list = resolve_splits(
+        time_v, splits=splits, campaign=campaign, mission=mission
+    )
 
     pca_tf: RollPCATransform | None = None
+    seg_pca_tfs: tuple[RollPCATransform, ...] | None = None
     if roll_pca:
         clean_pca = valid_coords & np.isfinite(flux_full) & q_fit_full & cmask_full
-        u1_full, u2_full, pca_tf = pca_normalize_xy(
-            x_full, y_full, clean_mask=clean_pca
+        u1_full, u2_full, pca_tf, seg_pca_tfs = pca_normalize_xy(
+            x_full,
+            y_full,
+            clean_mask=clean_pca,
+            time=time_full,
+            splits=splits_list,
+            return_segments=True,
         )
         x_v = u1_full[valid_coords]
         y_v = u2_full[valid_coords]
@@ -808,14 +887,8 @@ def detrend_array(
         x_v = x_full[valid_coords]
         y_v = y_full[valid_coords]
 
-    time_v = time_full[valid_coords]
-    flux_v = flux_full[valid_coords]
     inputs_v = np.column_stack([time_v, x_v, y_v])
     mflags_v = mflags_full[valid_coords].copy()
-
-    splits_list = resolve_splits(
-        time_v, splits=splits, campaign=campaign, mission=mission
-    )
 
     not_periodic_v = ~(mflags_v & M_PERIODIC).astype(bool)
     mexc_final_v = not_periodic_v & q_fit_full[valid_coords] & cmask_full[valid_coords]
@@ -936,6 +1009,7 @@ def detrend_array(
         opt_result=opt_res,
         lightcurve=None,
         pca_transform=pca_tf,
+        segment_pca_transforms=seg_pca_tfs,
     )
 
 
@@ -979,7 +1053,9 @@ def detrend_k2data(
     log = logger if logger is not None else logging.getLogger("k2sc.pipeline")
 
     eff_campaign = ds.campaign if ds.campaign is not None else campaign
-    splits_list = resolve_splits(ds.time, splits=splits, campaign=eff_campaign, mission="K2")
+    splits_list = resolve_splits(
+        ds.time, splits=splits, campaign=eff_campaign, mission="K2"
+    )
 
     if not quiet:
         log.info("Resolved splits %s (campaign=%s)", splits_list, eff_campaign)
@@ -993,8 +1069,7 @@ def detrend_k2data(
 
     if transit_mask is not None:
         is_tuple_spec = isinstance(transit_mask, (tuple, list)) and (
-            len(transit_mask) == 3
-            and not isinstance(transit_mask[0], (bool, np.bool_))
+            len(transit_mask) == 3 and not isinstance(transit_mask[0], (bool, np.bool_))
         )
         if is_tuple_spec:
             t0_m, per_m, dur_m = transit_mask
@@ -1012,21 +1087,24 @@ def detrend_k2data(
                 )
 
     mthf = (ds.quality & _K2_THRUSTER_FLAG) == 0
+    valid_ds = np.isfinite(ds.time) & np.isfinite(ds.x) & np.isfinite(ds.y)
     pca_tf: RollPCATransform | None = None
+    seg_pca_tfs: tuple[RollPCATransform, ...] | None = None
     if roll_pca:
         has_finite_flux = (
             np.any(np.isfinite(ds.fluxes), axis=0)
             if ds.fluxes.size > 0
             else np.zeros(ds.time.size, dtype=bool)
         )
-        clean_pca = (
-            np.isfinite(ds.time)
-            & np.isfinite(ds.x)
-            & np.isfinite(ds.y)
-            & mthf
-            & has_finite_flux
+        clean_pca = valid_ds & mthf & has_finite_flux
+        u1, u2, pca_tf, seg_pca_tfs = pca_normalize_xy(
+            ds.x,
+            ds.y,
+            clean_mask=clean_pca,
+            time=ds.time,
+            splits=splits_list,
+            return_segments=True,
         )
-        u1, u2, pca_tf = pca_normalize_xy(ds.x, ds.y, clean_mask=clean_pca)
         inputs = np.column_stack([ds.time, u1, u2])
     else:
         inputs = np.column_stack([ds.time, ds.x, ds.y])
@@ -1093,7 +1171,7 @@ def detrend_k2data(
     for iset in range(ds.nsets):
         flux = ds.fluxes[iset]
         mper = ~(ds.mflags[iset] & M_PERIODIC).astype(bool)
-        mexc_i = mper & mthf
+        mexc_i = valid_ds & mper & mthf
         base_mask_i = np.isfinite(flux) & mexc_i
 
         mask_i, period_i, power_i, fap_i = _initial_outlier_and_period_pass(
@@ -1208,6 +1286,7 @@ def detrend_k2data(
                 opt_result=opt_res_i,
                 lightcurve=None,
                 pca_transform=pca_tf,
+                segment_pca_transforms=seg_pca_tfs,
             )
         )
 
@@ -1268,7 +1347,10 @@ def detrend(
     3. 1D NumPy/JAX arrays ``detrend(time, flux, x=..., y=..., covariates=...)``:
        returns a ``K2SCResult``.
     """
-    _ = (save_dir, flux_type)  # accepted for legacy standalone.detrend signature compatibility
+    _ = (
+        save_dir,
+        flux_type,
+    )  # accepted for legacy standalone.detrend signature compatibility
 
     from .corrector import HAS_LIGHTKURVE, K2SCCorrector, LightCurve
 

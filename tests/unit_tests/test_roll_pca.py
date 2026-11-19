@@ -6,6 +6,7 @@ from dataclasses import FrozenInstanceError
 
 import astropy.io.fits as pf
 import astropy.units as u
+import jax.numpy as jnp
 import k2sc
 import matplotlib.pyplot as plt
 import numpy as np
@@ -16,9 +17,17 @@ from k2sc import cli
 from k2sc.corrector import K2SCCorrector
 from k2sc.k2data import K2Data
 from k2sc.k2io import FITSWriter, MASTReader
-from k2sc.pca import RollPCATransform, fit_roll_pca, pca_normalize_xy
+from k2sc.kernels import pad_splits
+from k2sc.pca import (
+    RollPCATransform,
+    fit_piecewise_roll_pca,
+    fit_roll_pca,
+    inverse_transform_piecewise_roll_pca,
+    pca_normalize_xy,
+    transform_piecewise_roll_pca,
+)
 from k2sc.pipeline import K2SCResult, detrend, detrend_k2data
-from lightkurve import KeplerLightCurve
+from lightkurve import KeplerLightCurve, TessLightCurve
 from scipy.special import ndtri
 
 _MAD_NORM = float(1.0 / ndtri(0.75))
@@ -151,9 +160,13 @@ class TestRollPCATransformGeometryAndScaling:
             RollPCATransform([np.nan, 0.0], np.eye(2), [1.0, 1.0])
         with pytest.raises(ValueError, match="rotation must be finite"):
             RollPCATransform([0.0, 0.0], [[np.inf, 0.0], [0.0, 1.0]], [1.0, 1.0])
-        with pytest.raises(ValueError, match="scales_u must be finite and strictly positive"):
+        with pytest.raises(
+            ValueError, match="scales_u must be finite and strictly positive"
+        ):
             RollPCATransform([0.0, 0.0], np.eye(2), [1.0, 0.0])
-        with pytest.raises(ValueError, match="scales_u must be finite and strictly positive"):
+        with pytest.raises(
+            ValueError, match="scales_u must be finite and strictly positive"
+        ):
             RollPCATransform([0.0, 0.0], np.eye(2), [1.0, -0.5])
 
         # Improper reflection (det = -1) and non-orthogonal shear rejected
@@ -268,9 +281,15 @@ class TestRollPCATransformGeometryAndScaling:
             x_gl[0] = glitch_val
             y_gl[0] = -0.7 * glitch_val
             tf_gl = fit_roll_pca(x_gl, y_gl)
-            npt.assert_allclose(tf_gl.center_xy, tf_ref0.center_xy, rtol=1e-12, atol=1e-12)
-            npt.assert_allclose(tf_gl.rotation, tf_ref0.rotation, rtol=1e-12, atol=1e-12)
-            npt.assert_allclose(tf_gl.scales_u, tf_ref0.scales_u, rtol=1e-12, atol=1e-12)
+            npt.assert_allclose(
+                tf_gl.center_xy, tf_ref0.center_xy, rtol=1e-12, atol=1e-12
+            )
+            npt.assert_allclose(
+                tf_gl.rotation, tf_ref0.rotation, rtol=1e-12, atol=1e-12
+            )
+            npt.assert_allclose(
+                tf_gl.scales_u, tf_ref0.scales_u, rtol=1e-12, atol=1e-12
+            )
 
         # 2) SO(2) rotational equivariance across arbitrary rotation angles (with asymmetric flyers)
         x_eq = x_clean.copy()
@@ -294,8 +313,14 @@ class TestRollPCATransformGeometryAndScaling:
                 tf_q.center_xy, q_mat @ tf0.center_xy, rtol=1e-11, atol=1e-11
             )
             npt.assert_allclose(tf_q.scales_u, tf0.scales_u, rtol=1e-11, atol=1e-11)
-            sign = 1.0 if float(np.dot(tf_q.rotation[0], q_mat @ tf0.rotation[0])) >= 0.0 else -1.0
-            npt.assert_allclose(tf_q.rotation, sign * (tf0.rotation @ q_mat.T), atol=1e-11)
+            sign = (
+                1.0
+                if float(np.dot(tf_q.rotation[0], q_mat @ tf0.rotation[0])) >= 0.0
+                else -1.0
+            )
+            npt.assert_allclose(
+                tf_q.rotation, sign * (tf0.rotation @ q_mat.T), atol=1e-11
+            )
             npt.assert_allclose(u1_q, sign * u1_0, rtol=1e-11, atol=1e-11)
             npt.assert_allclose(u2_q, sign * u2_0, rtol=1e-11, atol=1e-11)
 
@@ -324,9 +349,15 @@ class TestRollPCATransformGeometryAndScaling:
         tf_masked = fit_roll_pca(x_contaminated, y_contaminated, clean_mask=inlier_mask)
         tf_unmasked = fit_roll_pca(x_contaminated, y_contaminated)
 
-        npt.assert_allclose(tf_unmasked.center_xy, tf_masked.center_xy, rtol=1e-12, atol=1e-12)
-        npt.assert_allclose(tf_unmasked.rotation, tf_masked.rotation, rtol=1e-12, atol=1e-12)
-        npt.assert_allclose(tf_unmasked.scales_u, tf_masked.scales_u, rtol=1e-12, atol=1e-12)
+        npt.assert_allclose(
+            tf_unmasked.center_xy, tf_masked.center_xy, rtol=1e-12, atol=1e-12
+        )
+        npt.assert_allclose(
+            tf_unmasked.rotation, tf_masked.rotation, rtol=1e-12, atol=1e-12
+        )
+        npt.assert_allclose(
+            tf_unmasked.scales_u, tf_masked.scales_u, rtol=1e-12, atol=1e-12
+        )
         npt.assert_allclose(tf_unmasked.rotation, tf_clean_ref.rotation, atol=2e-3)
         npt.assert_allclose(tf_unmasked.scales_u, tf_clean_ref.scales_u, rtol=2e-2)
 
@@ -396,7 +427,9 @@ class TestRollPCATransformGeometryAndScaling:
         npt.assert_allclose(tf_scaled.scales_u, 1.0e4 * tf_unit.scales_u, rtol=1e-12)
 
         # 4) Discrete zero-MAD coordinate (>50% at median) WITH extreme flyers
-        x_disc_clean = np.concatenate([np.zeros(70), np.full(15, -1.0), np.full(15, 1.0)])
+        x_disc_clean = np.concatenate(
+            [np.zeros(70), np.full(15, -1.0), np.full(15, 1.0)]
+        )
         y_disc_clean = np.zeros(100)
         tf_disc_ref = fit_roll_pca(x_disc_clean, y_disc_clean)
         assert _sigma_mad(x_disc_clean) == 0.0
@@ -420,6 +453,137 @@ class TestRollPCATransformGeometryAndScaling:
         npt.assert_array_equal(tf_all_nan.center_xy, [0.0, 0.0])
         npt.assert_array_equal(tf_all_nan.rotation, np.eye(2))
         npt.assert_array_equal(tf_all_nan.scales_u, [1.0, 1.0])
+
+    def test_piecewise_roll_pca_splits_boundary_sparse_and_nan(self):
+        rng = np.random.default_rng(314)
+        # 1) Empty / None splits reduce identically to single-segment fit_roll_pca
+        t_single = np.linspace(10.0, 20.0, 80)
+        x_single = rng.normal(5.0, 0.3, size=80)
+        y_single = -0.4 * x_single + rng.normal(0.0, 0.01, size=80)
+        tf_ref = fit_roll_pca(x_single, y_single)
+        u1_ref, u2_ref = tf_ref.transform(x_single, y_single)
+
+        for empty_splits in (None, []):
+            seg_empty = fit_piecewise_roll_pca(
+                t_single, x_single, y_single, empty_splits
+            )
+            assert len(seg_empty) == 1
+            npt.assert_allclose(seg_empty[0].center_xy, tf_ref.center_xy, atol=1e-14)
+            npt.assert_allclose(seg_empty[0].rotation, tf_ref.rotation, atol=1e-14)
+            npt.assert_allclose(seg_empty[0].scales_u, tf_ref.scales_u, atol=1e-14)
+
+            u1_e, u2_e, tf_e, seg_e = pca_normalize_xy(
+                x_single,
+                y_single,
+                time=t_single,
+                splits=empty_splits,
+                return_segments=True,
+            )
+            assert len(seg_e) == 1
+            npt.assert_allclose(u1_e, u1_ref, atol=1e-14)
+            npt.assert_allclose(u2_e, u2_ref, atol=1e-14)
+            npt.assert_allclose(tf_e.rotation, tf_ref.rotation, atol=1e-14)
+
+        with pytest.raises(ValueError, match="`time` must be provided"):
+            pca_normalize_xy(x_single, y_single, splits=[15.0])
+
+        # 2) Three disjoint CCD sectors with distinct centres, roll angles, and scales
+        # Include an exact boundary cadence at t == split_0 to verify parity with kernels.py (t > split)
+        t0 = np.linspace(1000.0, 1020.0, 60)  # t0[-1] == 1020.0 == split_0
+        t1 = np.linspace(1050.0, 1070.0, 60)
+        t2 = np.linspace(1100.0, 1120.0, 60)
+        t_all = np.concatenate([t0, t1, t2])
+        splits = [1020.0, 1085.0]
+
+        sector_specs = [
+            ((210.0, 1520.0), np.radians(15.0), 0.30, 0.015),
+            ((1840.0, 390.0), np.radians(-55.0), 0.18, 0.008),
+            ((1100.0, 1750.0), np.radians(70.0), 0.45, 0.025),
+        ]
+        xs, ys = [], []
+        for (cx, cy), ang, s_along, s_cross in sector_specs:
+            a = rng.uniform(-s_along, s_along, size=60)
+            b = rng.normal(0.0, s_cross, size=60)
+            xs.append(cx + np.cos(ang) * a - np.sin(ang) * b)
+            ys.append(cy + np.sin(ang) * a + np.cos(ang) * b)
+        x_all = np.concatenate(xs)
+        y_all = np.concatenate(ys)
+
+        # Verify exact segment assignment parity with PiecewiseSpatialKernel (jnp.sum(t > splits_padded))
+        s_pad = pad_splits(splits)
+        kernel_seg = np.asarray(
+            jnp.sum(jnp.asarray(t_all)[:, None] > s_pad[None, :], axis=-1),
+            dtype=np.int64,
+        )
+        pca_seg = np.searchsorted(np.sort(splits), t_all, side="left")
+        npt.assert_array_equal(pca_seg, kernel_seg)
+        assert (
+            pca_seg[59] == 0
+        )  # Exact boundary cadence t == 1020.0 belongs to segment 0
+
+        u1_pw, u2_pw, global_tf, seg_tfs = pca_normalize_xy(
+            x_all, y_all, time=t_all, splits=splits, return_segments=True
+        )
+        assert isinstance(global_tf, RollPCATransform)
+        assert len(seg_tfs) == 3
+        # Global transform spans ~10^3 pix inter-sector jump, while per-segment scales stay O(0.1-1) pix
+        assert global_tf.scales_u[0] > 500.0
+        for s_idx, tf_s in enumerate(seg_tfs):
+            sel = pca_seg == s_idx
+            assert tf_s.scales_u[0] < 3.0
+            assert tf_s.scales_u[1] < 0.3
+            assert _sigma_mad(u1_pw[sel]) == pytest.approx(0.25, rel=1e-9, abs=1e-9)
+            assert _sigma_mad(u2_pw[sel]) == pytest.approx(0.25, rel=1e-9, abs=1e-9)
+            assert abs(float(np.corrcoef(u1_pw[sel], u2_pw[sel])[0, 1])) < 1e-10
+
+        # Exact boundary cadence t == split_0 was transformed by seg_tfs[0], not seg_tfs[1]
+        b_u1, b_u2 = seg_tfs[0].transform([x_all[59]], [y_all[59]])
+        assert u1_pw[59] == pytest.approx(float(b_u1[0]), abs=1e-14)
+        assert u2_pw[59] == pytest.approx(float(b_u2[0]), abs=1e-14)
+
+        # Round-trip piecewise inverse recovers physical (x, y) to machine precision
+        x_rec, y_rec = inverse_transform_piecewise_roll_pca(
+            t_all, u1_pw, u2_pw, splits, seg_tfs
+        )
+        npt.assert_allclose(x_rec, x_all, rtol=1e-12, atol=1e-11)
+        npt.assert_allclose(y_rec, y_all, rtol=1e-12, atol=1e-11)
+
+        # 3) Sparse segment (6 clean cadences < min_points=20) reuses primary active rotation & scales
+        #    while centring locally at its own clean spatial median; NaNs are preserved.
+        t_sp = np.concatenate([t0, np.linspace(1050.0, 1055.0, 6)])
+        x_sp_seg = 900.0 + np.array([-0.04, -0.02, 0.0, 0.01, 0.03, 0.05])
+        y_sp_seg = -400.0 + np.array([0.01, -0.01, 0.0, 0.02, -0.02, 0.01])
+        x_sp = np.concatenate([xs[0], x_sp_seg])
+        y_sp = np.concatenate([ys[0], y_sp_seg])
+        x_sp[2] = np.nan
+        t_sp[3] = np.nan
+
+        seg_sp = fit_piecewise_roll_pca(t_sp, x_sp, y_sp, [1025.0], min_points=20)
+        assert len(seg_sp) == 2
+        npt.assert_allclose(seg_sp[1].rotation, seg_sp[0].rotation, atol=1e-14)
+        npt.assert_allclose(seg_sp[1].scales_u, seg_sp[0].scales_u, atol=1e-14)
+        npt.assert_allclose(seg_sp[1].center_xy, [900.0, -400.0], atol=0.05)
+
+        u1_sp, u2_sp = transform_piecewise_roll_pca(t_sp, x_sp, y_sp, [1025.0], seg_sp)
+        assert np.isnan(u1_sp[2]) and np.isnan(u2_sp[2])
+        assert np.isnan(u1_sp[3]) and np.isnan(u2_sp[3])
+        assert np.all(np.isfinite(u1_sp[60:])) and np.all(np.isfinite(u2_sp[60:]))
+        assert np.all(np.abs(u1_sp[60:]) < 2.0)
+
+        # 4) All-sparse segments (< min_points in every segment) -> identity rotation & unit scales
+        t_tiny = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 21.0, 22.0, 23.0, 24.0, 25.0])
+        x_tiny = np.array(
+            [10.0, 10.1, 10.2, 10.3, 10.4, 500.0, 500.1, 500.2, 500.3, 500.4]
+        )
+        y_tiny = np.array(
+            [-5.0, -4.9, -4.8, -4.7, -4.6, 800.0, 800.1, 800.2, 800.3, 800.4]
+        )
+        seg_tiny = fit_piecewise_roll_pca(t_tiny, x_tiny, y_tiny, [10.0], min_points=20)
+        assert len(seg_tiny) == 2
+        for tf_t, exp_c in zip(seg_tiny, ([10.2, -4.8], [500.2, 800.2]), strict=True):
+            npt.assert_array_equal(tf_t.rotation, np.eye(2))
+            npt.assert_array_equal(tf_t.scales_u, [1.0, 1.0])
+            npt.assert_allclose(tf_t.center_xy, exp_c, atol=1e-12)
 
 
 class TestEndToEndRollPCAPipelineAndCLI:
@@ -528,9 +692,15 @@ class TestEndToEndRollPCAPipelineAndCLI:
                 ],
                 scales_u=[hdr["PCA_S1"], hdr["PCA_S2"]],
             )
-            npt.assert_allclose(tf_from_hdr.center_xy, tf.center_xy, rtol=1e-13, atol=1e-13)
-            npt.assert_allclose(tf_from_hdr.rotation, tf.rotation, rtol=1e-13, atol=1e-13)
-            npt.assert_allclose(tf_from_hdr.scales_u, tf.scales_u, rtol=1e-13, atol=1e-13)
+            npt.assert_allclose(
+                tf_from_hdr.center_xy, tf.center_xy, rtol=1e-13, atol=1e-13
+            )
+            npt.assert_allclose(
+                tf_from_hdr.rotation, tf.rotation, rtol=1e-13, atol=1e-13
+            )
+            npt.assert_allclose(
+                tf_from_hdr.scales_u, tf.scales_u, rtol=1e-13, atol=1e-13
+            )
 
             assert np.isnan(hdul[1].data["x"][4])
             assert np.isnan(hdul[1].data["y"][4])
@@ -580,9 +750,15 @@ class TestEndToEndRollPCAPipelineAndCLI:
         npt.assert_allclose(clc_on.meta["K2SC_PCA_CENTER"], tf_on.center_xy)
         npt.assert_allclose(clc_on.meta["K2SC_PCA_ROTATION"], tf_on.rotation)
         npt.assert_allclose(clc_on.meta["K2SC_PCA_SCALES"], tf_on.scales_u)
+        assert clc_on.meta["K2SC_PCA_NSEGMENTS"] == 2
+        assert len(clc_on.meta["K2SC_SEGMENT_PCA"]) == 2
+        assert corr_on.result.segment_pca_transforms is not None
+        assert len(corr_on.result.segment_pca_transforms) == 2
 
-        # diagnose_xy maps training set back to physical (x, y) detector coordinates
+        # diagnose_xy maps single-CCD training set back to physical (x, y) detector coordinates
         ax_xy = corr_on.diagnose_xy()
+        assert ax_xy.get_xlabel() == "x covariate"
+        assert ax_xy.get_ylabel() == "y covariate"
         line_xy = ax_xy.lines[0]
         assert np.min(line_xy.get_xdata()) >= np.min(sim["x"]) - 1e-6
         assert np.max(line_xy.get_xdata()) <= np.max(sim["x"]) + 1e-6
@@ -594,8 +770,11 @@ class TestEndToEndRollPCAPipelineAndCLI:
         clc_off = corr_off.correct(splits=[2344.0], roll_pca=False, **_FAST_KW)
         assert corr_off.result is not None
         assert corr_off.result.pca_transform is None
+        assert corr_off.result.segment_pca_transforms is None
         assert clc_off.meta["K2SC_ROLL_PCA"] is False
         assert "K2SC_PCA_CENTER" not in clc_off.meta
+        assert "K2SC_PCA_NSEGMENTS" not in clc_off.meta
+        assert "K2SC_SEGMENT_PCA" not in clc_off.meta
         # Re-correcting an already PCA-corrected LightCurve with roll_pca=False must purge stale K2SC_PCA_* meta
         clc_reoff = K2SCCorrector(clc_on).correct(
             splits=[2344.0], roll_pca=False, **_FAST_KW
@@ -604,6 +783,8 @@ class TestEndToEndRollPCAPipelineAndCLI:
         assert "K2SC_PCA_CENTER" not in clc_reoff.meta
         assert "K2SC_PCA_ROTATION" not in clc_reoff.meta
         assert "K2SC_PCA_SCALES" not in clc_reoff.meta
+        assert "K2SC_PCA_NSEGMENTS" not in clc_reoff.meta
+        assert "K2SC_SEGMENT_PCA" not in clc_reoff.meta
         assert corr_on.cdpp_t < corr_off.cdpp_t
 
         # CLI argument parser default True and --no-roll-pca -> False
@@ -662,3 +843,90 @@ class TestEndToEndRollPCAPipelineAndCLI:
         assert (tmp_path / "EPIC_211436265_mast.fits").resolve() == (
             tmp_path / out_path
         ).resolve()
+
+    def test_multisector_stitched_tess_roll_pca_detrending_and_diagnose_xy(self):
+        """Stitched 3-sector TESS LC across >1000-pix CCD jumps detrends cleanly."""
+        rng = np.random.default_rng(2027)
+        n_per = 64
+        t_secs = [
+            np.linspace(1500.0, 1512.0, n_per),
+            np.linspace(1540.0, 1552.0, n_per),
+            np.linspace(1580.0, 1592.0, n_per),
+        ]
+        # Three distinct CCD locations separated by >1000 pix with distinct roll orientations
+        ccd_specs = [
+            ((210.0, 1520.0), np.radians(20.0), 1.0, -0.7),
+            ((1840.0, 390.0), np.radians(-45.0), -0.9, 0.8),
+            ((1100.0, 1750.0), np.radians(65.0), 0.8, 0.9),
+        ]
+        cols, rows, pos_sys_list = [], [], []
+        for t_s, ((cx, cy), ang, c1, c2) in zip(t_secs, ccd_specs, strict=True):
+            tau = t_s - t_s[0]
+            along = 0.14 * np.sin(2.0 * np.pi * tau / 0.9) + 0.04 * np.cos(
+                2.0 * np.pi * tau / 3.1
+            )
+            cross = 0.025 * np.cos(2.0 * np.pi * tau / 1.3) + rng.normal(
+                0.0, 0.005, size=n_per
+            )
+            cols.append(cx + np.cos(ang) * along - np.sin(ang) * cross)
+            rows.append(cy + np.sin(ang) * along + np.cos(ang) * cross)
+            pos_sys_list.append(
+                1.8e-3 * c1 * (along / 0.14) + 1.1e-3 * c2 * (cross / 0.025)
+            )
+
+        t = np.concatenate(t_secs)
+        cent_col = np.concatenate(cols)
+        cent_row = np.concatenate(rows)
+        pos_sys = np.concatenate(pos_sys_list)
+        white_noise = rng.normal(0.0, 1.5e-4, size=t.size)
+        flux = 1.0e4 * (1.0 + pos_sys + white_noise)
+
+        lc_tess = TessLightCurve(
+            time=Time(t, format="btjd"),
+            flux=flux * (u.electron / u.s),
+            flux_err=np.full(t.size, 1.5, dtype=np.float64) * (u.electron / u.s),
+            meta={"MISSION": "TESS", "TICID": 307210830},
+        )
+        lc_tess["centroid_col"] = cent_col * u.pix
+        lc_tess["centroid_row"] = cent_row * u.pix
+
+        corr = K2SCCorrector(lc_tess)
+        clc = corr.correct(
+            roll_pca=True,
+            optimizer="multistart",
+            tr_nrandom=72,
+            tr_nblocks=3,
+            tr_bspan=16,
+            n_candidates=24,
+            top_k=2,
+            maxiter=40,
+            seed=42,
+            quiet=True,
+        )
+        res = corr.result
+        assert res is not None
+        assert len(res.splits) == 2
+        assert res.segment_pca_transforms is not None
+        assert len(res.segment_pca_transforms) == 3
+        assert clc.meta["K2SC_PCA_NSEGMENTS"] == 3
+        assert len(clc.meta["K2SC_SEGMENT_PCA"]) == 3
+
+        # Global transform spans the >1000-pix CCD jump while each sector transform stays intra-sector
+        assert res.pca_transform is not None
+        assert res.pca_transform.scales_u[0] > 500.0
+        for tf_s in res.segment_pca_transforms:
+            assert tf_s.scales_u[0] < 2.0
+            assert tf_s.scales_u[1] < 0.5
+
+        # Piecewise roll PCA removes intra-sector systematics cleanly (~2x+ CDPP reduction)
+        assert res.cdpp_t < 0.5 * res.cdpp_r
+
+        # diagnose_xy switches to normalized roll coordinates instead of collapsing sectors to dots
+        ax_xy = corr.diagnose_xy()
+        assert ax_xy.get_xlabel() == "Roll PC1 (4-MAD normalized)"
+        assert ax_xy.get_ylabel() == "Roll PC2 (4-MAD normalized)"
+        tr_line = ax_xy.lines[0]
+        assert np.all(np.isfinite(tr_line.get_xdata()))
+        assert np.all(np.abs(tr_line.get_xdata()) < 10.0)
+        assert np.all(np.abs(tr_line.get_ydata()) < 10.0)
+        plt.close("all")
