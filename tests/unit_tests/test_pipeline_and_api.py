@@ -22,7 +22,15 @@ from k2sc.core import (
 from k2sc.corrector import K2SCCorrector, _to_float64_array
 from k2sc.k2data import K2Data
 from k2sc.k2io import FITSWriter
-from k2sc.pipeline import K2SCResult, SCResult, detrend, resolve_splits
+from k2sc.pipeline import (
+    K2SCResult,
+    SCResult,
+    _coerce_covariates,
+    _detrend_for_clipping,
+    detrend,
+    detrend_k2data,
+    resolve_splits,
+)
 from k2sc.standalone import k2sc_lc
 from lightkurve import KeplerLightCurve, LightCurve, TessLightCurve
 from lightkurve.correctors import DesignMatrix
@@ -40,6 +48,7 @@ def _cleanup_lazy_package_attrs():
     k2sc.__dict__.pop("pipeline", None)
     k2sc.__dict__.pop("corrector", None)
     k2sc.__dict__.pop("standalone", None)
+
 
 # Fast, deterministic optimizer settings with shared training shape (48 + 2*16 = 80)
 # so XLA compiles each kernel graph once across the test module.
@@ -105,7 +114,9 @@ class TestExportsAndAstropyUnwrapping:
         npt.assert_allclose(arr_iso[1] - arr_iso[0], 1.0, atol=1e-9)
 
         # 2. Masked Time
-        t_masked = Time(Masked([2300.0, 2301.0, 2302.0], mask=[False, True, False]), format="bkjd")
+        t_masked = Time(
+            Masked([2300.0, 2301.0, 2302.0], mask=[False, True, False]), format="bkjd"
+        )
         arr_tm = _to_float64_array(t_masked)
         assert arr_tm.dtype == np.float64
         assert np.isnan(arr_tm[1])
@@ -227,7 +238,9 @@ class TestLightkurveCorrectorAndPolymorphicAPI:
 
         # Invalid coordinate cadences [4, 60, 95] unpack to NaN trends and M_NOTFINITE
         bad_coord_idx = [4, 60, 95]
-        assert np.all(np.isnan(_to_float64_array(clc["k2sc_tr_position"])[bad_coord_idx]))
+        assert np.all(
+            np.isnan(_to_float64_array(clc["k2sc_tr_position"])[bad_coord_idx])
+        )
         assert np.all(np.isnan(_to_float64_array(clc["k2sc_tr_time"])[bad_coord_idx]))
         for idx in bad_coord_idx + [10]:
             assert (clc["k2sc_mflags"][idx] & M_NOTFINITE) != 0
@@ -299,7 +312,9 @@ class TestLightkurveCorrectorAndPolymorphicAPI:
         assert res.cdpp_t < res.cdpp_r
 
     def test_generic_lc_design_matrix_transit_masks_and_remove_time_trend(self):
-        sim = _make_synthetic_k2_series(n_pts=128, seed=404, periodic_amp=2.5e-3, period=5.2)
+        sim = _make_synthetic_k2_series(
+            n_pts=128, seed=404, periodic_amp=2.5e-3, period=5.2
+        )
         t = sim["time"]
         flux = sim["flux"].copy()
 
@@ -401,7 +416,9 @@ class TestK2DataArraysAndLegacyShims:
             assert np.isnan(hdul[1].data["trposi_2"][3])
 
     def test_raw_arrays_8tuple_unpack_and_ls_fap_threshold(self):
-        sim = _make_synthetic_k2_series(n_pts=128, seed=707, periodic_amp=4.0e-3, period=5.5)
+        sim = _make_synthetic_k2_series(
+            n_pts=128, seed=707, periodic_amp=4.0e-3, period=5.5
+        )
         # Pass JAX arrays directly and exercise default optimizer="auto" path end-to-end
         auto_kw = {**_FAST_KW, "optimizer": "auto"}
         res = k2sc.detrend(
@@ -466,3 +483,259 @@ class TestK2DataArraysAndLegacyShims:
         assert isinstance(lc.pv, np.ndarray)
         assert lc.cdpp_t < lc.cdpp_r
         assert lc.detrender is not None
+
+    def test_coerce_covariates_clean_masked_standardized_svd_and_thruster_flyer(self):
+        rng = np.random.default_rng(909)
+        n = 128
+        t = np.linspace(2332.0, 2356.0, n, dtype=np.float64)
+        s1 = np.sin(2.0 * np.pi * (t - 2332.0) / 1.1)
+        s2 = np.cos(2.0 * np.pi * (t - 2332.0) / 2.3)
+        s3 = 0.6 * s1 - 0.5 * s2 + rng.normal(0.0, 0.15, size=n)
+
+        # Disparate column scales (1e-4, 1e+3, 1.0) plus constant float intercept (0.3)
+        # Note np.std(np.full(n, 0.3)) ~ 5.55e-17 > 0 in IEEE-754; must still be dropped
+        const_03 = np.full(n, 0.3, dtype=np.float64)
+        assert float(np.std(const_03)) > 0.0
+        cov_clean = np.column_stack([const_03, 1.0e-4 * s1, 1.0e3 * s2, s3])
+        cov_flyer = cov_clean.copy()
+        thruster_idx = np.array([10, 45, 90])
+        clean_mask = np.ones(n, dtype=bool)
+        clean_mask[thruster_idx] = False
+        # Inject an excluded-row offset on the constant 0.3 column + 1e5 flyer on col 3
+        cov_flyer[thruster_idx, 0] = 0.8
+        cov_flyer[thruster_idx, 3] = (
+            1.0e5  # Huge 1e5 flyer on excluded thruster cadences
+        )
+
+        v_ref, x_ref, y_ref = _coerce_covariates(
+            n, covariates=cov_clean, clean_mask=clean_mask
+        )
+        v_fly, x_fly, y_fly = _coerce_covariates(
+            n, covariates=cov_flyer, clean_mask=clean_mask
+        )
+        assert np.all(v_ref) and np.all(v_fly)
+        # Clean rows must be completely unaffected by the 1e5 excluded thruster flyer
+        npt.assert_allclose(
+            x_fly[clean_mask], x_ref[clean_mask], rtol=1e-12, atol=1e-12
+        )
+        npt.assert_allclose(
+            y_fly[clean_mask], y_ref[clean_mask], rtol=1e-12, atol=1e-12
+        )
+        assert np.all(np.isfinite(x_fly[thruster_idx]))
+        assert np.all(np.isfinite(y_fly[thruster_idx]))
+        # Excluded-row offset on the dropped constant 0.3 column must NOT blow up by ~1e16
+        assert float(np.max(np.abs(x_fly[thruster_idx]))) < 1.0e6
+        assert float(np.max(np.abs(y_fly[thruster_idx]))) < 1.0e6
+
+        # Constant 0.3 column with 1-ULP rounding jitter on clean rows is also dropped
+        cov_ulp = cov_clean.copy()
+        cov_ulp[1, 0] = np.nextafter(0.3, 1.0)
+        cov_ulp[thruster_idx, 0] = 0.8
+        _v_ulp, x_ulp, y_ulp = _coerce_covariates(
+            n, covariates=cov_ulp, clean_mask=clean_mask
+        )
+        npt.assert_allclose(
+            x_ulp[clean_mask], x_ref[clean_mask], rtol=1e-12, atol=1e-12
+        )
+        npt.assert_allclose(
+            y_ulp[clean_mask], y_ref[clean_mask], rtol=1e-12, atol=1e-12
+        )
+        assert float(np.max(np.abs(x_ulp[thruster_idx]))) < 1.0e6
+
+        # Scale invariance across disparate column units (rescale col 1 by 1e6, col 2 by 1e-6)
+        cov_rescaled = cov_clean.copy()
+        cov_rescaled[:, 1] *= 1.0e6
+        cov_rescaled[:, 2] *= 1.0e-6
+        _v_sc, x_sc, y_sc = _coerce_covariates(
+            n, covariates=cov_rescaled, clean_mask=clean_mask
+        )
+        npt.assert_allclose(x_sc[clean_mask], x_ref[clean_mask], rtol=1e-12, atol=1e-12)
+        npt.assert_allclose(y_sc[clean_mask], y_ref[clean_mask], rtol=1e-12, atol=1e-12)
+
+        # End-to-end detrend with K2 thruster quality bit and 1e5 covariate flyer
+        quality = np.zeros(n, dtype=np.int32)
+        quality[thruster_idx] = 1 << 20
+        sys_flux = 3.5e-3 * s1 - 2.8e-3 * s2
+        flux = 1.0e4 * (1.0 + sys_flux + rng.normal(0.0, 1.5e-4, size=n))
+        res = detrend(
+            t,
+            flux,
+            covariates=cov_flyer,
+            quality=quality,
+            splits=[],
+            **_FAST_KW,
+        )
+        assert res.cdpp_t < 0.6 * res.cdpp_r
+
+    def test_zero_valid_rows_batch_resilience_and_legendre_guard(self, tmp_path):
+        # 1) detrend_k2data with ds.npoints == 0 (all-NaN x across 2 apertures) must NOT raise
+        n_raw = 30
+        t_raw = np.linspace(2332.0, 2340.0, n_raw)
+        fluxes_raw = np.vstack([np.full(n_raw, 1.0e4), np.full(n_raw, 2.0e4)])
+        errors_raw = np.ones_like(fluxes_raw)
+        ds_empty = K2Data(
+            211436265,
+            time=t_raw,
+            cadence=np.arange(n_raw, dtype=np.int32),
+            quality=np.zeros(n_raw, dtype=np.int32),
+            fluxes=fluxes_raw,
+            errors=errors_raw,
+            x=np.full(n_raw, np.nan),
+            y=np.zeros(n_raw),
+            campaign=5,
+        )
+        assert ds_empty.npoints == 0
+        assert ds_empty.nsets == 2
+
+        results = detrend_k2data(ds_empty, roll_pca=True, **_FAST_KW)
+        assert len(results) == 2
+        for r in results:
+            assert r.warn is True
+            assert r.success is False
+            assert r.cdpp_r == -1.0
+            assert r.cdpp_t == -1.0
+            assert r.cdpp_c == -1.0
+            assert np.all(np.isnan(r.pv))
+            assert np.all(np.isnan(r.detrender.tr_pv))
+
+        out_fits = tmp_path / "empty_star.fits"
+        FITSWriter.write(out_fits, results[0].splits, ds_empty, results)
+        with pf.open(out_fits) as hdul:
+            assert len(hdul[1].data) == n_raw
+            assert hdul[1].header["AP1_WARN"] is True
+            assert hdul[1].header["AP2_WARN"] is True
+            assert hdul[1].header["CDPP1R"] == -1.0
+            assert np.all(np.isnan(hdul[1].data["trposi_1"]))
+            assert np.all(np.isnan(hdul[1].data["trtime_2"]))
+
+        # 2) detrend_array raises ValueError on length-0 inputs, skips gracefully on all-NaN coords
+        with pytest.raises(ValueError, match="non-empty"):
+            detrend(
+                np.array([]), np.array([]), x=np.array([]), y=np.array([]), **_FAST_KW
+            )
+
+        res_nan_xy = detrend(
+            t_raw,
+            fluxes_raw[0],
+            x=np.full(n_raw, np.nan),
+            y=np.zeros(n_raw),
+            splits=[],
+            **_FAST_KW,
+        )
+        assert res_nan_xy.warn is True
+        assert res_nan_xy.success is False
+        assert res_nan_xy.cdpp_r == -1.0
+        assert res_nan_xy.tr_position.shape == (n_raw,)
+        assert np.all(np.isnan(res_nan_xy.tr_position))
+
+        # 3) Legendre.fit guard: zero time span (identical timestamps) and few unique timestamps (n_unique <= deg)
+        # Use n=128 to reuse the module's compiled N_tr=80 XLA graph.
+        rng = np.random.default_rng(111)
+        n_leg = 128
+        x_g = rng.uniform(-0.3, 0.3, size=n_leg)
+        y_g = rng.uniform(-0.3, 0.3, size=n_leg)
+        f_g = 1.0e4 * (1.0 + 2e-3 * x_g + rng.normal(0.0, 1e-4, size=n_leg))
+
+        t_const = np.full(n_leg, 2340.0, dtype=np.float64)
+        res_const_t = detrend(t_const, f_g, x=x_g, y=y_g, splits=[], **_FAST_KW)
+        assert res_const_t.ls_period is None
+        assert res_const_t.tr_position.shape == (n_leg,)
+
+        t_few_unique = np.repeat([2340.0, 2341.0, 2342.0], [43, 43, 42]).astype(
+            np.float64
+        )
+        res_few_t = detrend(t_few_unique, f_g, x=x_g, y=y_g, splits=[], **_FAST_KW)
+        assert res_few_t.tr_position.shape == (n_leg,)
+
+    def test_standalone_get_k2data_id_fallbacks_and_outlier_sigma_mwidth(self):
+        sim = _make_synthetic_k2_series(n_pts=128, seed=1212)
+
+        # 1) k2sc_lc.get_k2data() ID fallback chain: targetid -> KEPLERID -> EPIC -> TICID -> 0
+        for meta, expected_epic in (
+            ({"TARGETID": 211436265, "CAMPAIGN": 5}, 211436265),
+            ({"KEPLERID": 203794605, "CAMPAIGN": 2}, 203794605),
+            ({"EPIC": 212345678}, 212345678),
+            ({"TICID": 307210830}, 307210830),
+            ({}, 0),
+        ):
+            lc = KeplerLightCurve(
+                time=Time(sim["time"], format="bkjd"),
+                flux=sim["flux"] * (u.electron / u.s),
+                flux_err=sim["flux_err"] * (u.electron / u.s),
+                meta=meta,
+            )
+            lc["pos_corr1"] = sim["x"] * u.pix
+            lc["pos_corr2"] = sim["y"] * u.pix
+            lc.__class__ = k2sc_lc
+            with pytest.warns(DeprecationWarning, match="deprecated"):
+                ds = lc.get_k2data()
+            assert isinstance(ds, K2Data)
+            assert ds.epic == expected_epic
+            assert ds.npoints == 128
+            npt.assert_allclose(ds.time, sim["time"])
+            npt.assert_allclose(ds.x, sim["x"])
+            npt.assert_allclose(ds.y, sim["y"])
+
+        # 2) outlier_sigma sensitivity on a moderate (~4-sigma) upward spike
+        flux_sp = sim["flux"].copy()
+        spike_idx = 50
+        flux_sp[spike_idx] += 6.0  # ~5x white-noise sigma (noise std = 1.2)
+        res_tight = detrend(
+            sim["time"],
+            flux_sp,
+            x=sim["x"],
+            y=sim["y"],
+            splits=[2344.0],
+            outlier_sigma=2.5,
+            **_FAST_KW,
+        )
+        res_loose = detrend(
+            sim["time"],
+            flux_sp,
+            x=sim["x"],
+            y=sim["y"],
+            splits=[2344.0],
+            outlier_sigma=12.0,
+            **_FAST_KW,
+        )
+        assert (res_tight.mflags[spike_idx] & M_OUTLIER_U) != 0
+        assert not res_tight.outlier_mask[spike_idx]
+        assert (res_loose.mflags[spike_idx] & M_OUTLIER_U) == 0
+        assert res_loose.outlier_mask[spike_idx]
+
+        # 3) outlier_mwidth=None vs finite window on _detrend_for_clipping and end-to-end detrend
+        idx = np.linspace(0.0, 1.0, 128)
+        curved = 1.0 + 0.05 * np.sin(2.0 * np.pi * idx)
+        curved[64] += 0.02
+        valid_m = np.ones(128, dtype=bool)
+        unflat = _detrend_for_clipping(curved, valid_m, None)
+        npt.assert_array_equal(unflat, curved)
+        flat = _detrend_for_clipping(curved, valid_m, 15)
+        # Running median removes the smooth sinusoid while preserving the point spike at index 64
+        assert float(np.std(np.delete(flat, 64))) < 0.25 * float(
+            np.std(np.delete(curved, 64))
+        )
+        assert float(flat[64] - np.median(flat)) > 0.015
+
+        res_mw_none = detrend(
+            sim["time"],
+            flux_sp,
+            x=sim["x"],
+            y=sim["y"],
+            splits=[2344.0],
+            outlier_mwidth=None,
+            outlier_sigma=3.0,
+            **_FAST_KW,
+        )
+        res_mw_15 = detrend(
+            sim["time"],
+            flux_sp,
+            x=sim["x"],
+            y=sim["y"],
+            splits=[2344.0],
+            outlier_mwidth=15,
+            outlier_sigma=3.0,
+            **_FAST_KW,
+        )
+        assert (res_mw_none.mflags[spike_idx] & M_OUTLIER_U) != 0
+        assert (res_mw_15.mflags[spike_idx] & M_OUTLIER_U) != 0

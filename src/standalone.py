@@ -19,7 +19,9 @@ from .k2data import K2Data
 from .ls import psearch
 from .pipeline import K2SCResult, SCResult, detrend
 
-_BaseLC = KeplerLightCurve if (HAS_LIGHTKURVE and KeplerLightCurve is not None) else object
+_BaseLC = (
+    KeplerLightCurve if (HAS_LIGHTKURVE and KeplerLightCurve is not None) else object
+)
 
 
 class k2sc_lc(_BaseLC):  # type: ignore[misc,valid-type]
@@ -74,17 +76,29 @@ class k2sc_lc(_BaseLC):  # type: ignore[misc,valid-type]
             y_arr = cov_arr[:, 1] if cov_arr.shape[1] > 1 else np.zeros_like(x_arr)
         assert x_arr is not None and y_arr is not None
 
-        target_id = getattr(self, "targetid", None)
-        if target_id is None:
-            target_id = (getattr(self, "meta", {}) or {}).get("TARGETID", 0)
-        try:
-            epic = int(target_id)
-        except (TypeError, ValueError):
-            epic = 0
+        meta = getattr(self, "meta", {}) or {}
+        meta_upper = {str(k).upper(): v for k, v in meta.items()}
+        id_candidates = (
+            getattr(self, "targetid", None),
+            getattr(self, "keplerid", None),
+            meta_upper.get("TARGETID"),
+            meta_upper.get("KEPLERID"),
+            meta_upper.get("EPIC"),
+            meta_upper.get("TICID"),
+        )
+        epic = 0
+        for cand in id_candidates:
+            if cand is None:
+                continue
+            try:
+                epic = int(cand)
+                break
+            except (TypeError, ValueError):
+                continue
 
         campaign = getattr(self, "campaign", None)
         if campaign is None:
-            campaign = (getattr(self, "meta", {}) or {}).get("CAMPAIGN", None)
+            campaign = meta_upper.get("CAMPAIGN", None)
 
         primary_header = getattr(self, "primary_header", None)
         data_header = getattr(self, "data_header", None)

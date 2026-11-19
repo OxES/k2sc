@@ -11,7 +11,13 @@ import numpy as np
 from ._jax_env import ensure_float64
 from .core import M_PERIODIC
 from .kernels import DtKernel
-from .pipeline import K2SCResult, _coerce_covariates, detrend_array
+from .pca import inverse_transform_piecewise_roll_pca
+from .pipeline import (
+    _K2_THRUSTER_FLAG,
+    K2SCResult,
+    _coerce_covariates,
+    detrend_array,
+)
 
 ensure_float64()
 
@@ -208,6 +214,7 @@ class K2SCCorrector(_BaseCorrector):
         self._x_arr, self._y_arr, self._cov_arr, self.covariate_source = (
             self._resolve_lc_covariates(lc, x=x, y=y, covariates=covariates)
         )
+        self._cov_clean_mask: np.ndarray | None = None
 
         self.result: K2SCResult | None = None
         self.detrender = None
@@ -356,9 +363,7 @@ class K2SCCorrector(_BaseCorrector):
             systematics ``tr_position - nanmedian(tr_position)`` (preserving stellar
             variability and transits). If ``True``, also removes ``tr_time - nanmedian(tr_time)``.
         """
-        mission, eff_campaign = _infer_mission_and_campaign(
-            self.original_lc, campaign
-        )
+        mission, eff_campaign = _infer_mission_and_campaign(self.original_lc, campaign)
 
         res = detrend_array(
             self._time_arr,
@@ -429,6 +434,9 @@ class K2SCCorrector(_BaseCorrector):
             meta_updates["K2SC_PCA_CENTER"] = res.pca_transform.center_xy.copy()
             meta_updates["K2SC_PCA_ROTATION"] = res.pca_transform.rotation.copy()
             meta_updates["K2SC_PCA_SCALES"] = res.pca_transform.scales_u.copy()
+        if res.segment_pca_transforms is not None:
+            meta_updates["K2SC_PCA_NSEGMENTS"] = len(res.segment_pca_transforms)
+            meta_updates["K2SC_SEGMENT_PCA"] = tuple(res.segment_pca_transforms)
         if res.ls_period is not None:
             meta_updates["K2SC_LS_PERIOD"] = float(res.ls_period)
         if res.ls_fap is not None:
@@ -439,6 +447,8 @@ class K2SCCorrector(_BaseCorrector):
                 "K2SC_PCA_CENTER",
                 "K2SC_PCA_ROTATION",
                 "K2SC_PCA_SCALES",
+                "K2SC_PCA_NSEGMENTS",
+                "K2SC_SEGMENT_PCA",
             ):
                 corrected_lc.meta.pop(_pca_meta_key, None)
 
@@ -447,11 +457,24 @@ class K2SCCorrector(_BaseCorrector):
             object.__setattr__(corrected_lc, "k2sc_result", res)
 
         # Reconstruct full-length fit cadence mask
+        mission_norm = (mission or "").strip().upper()
+        q_fit = (
+            self._quality_arr == 0
+            if mission_norm == "TESS"
+            else (self._quality_arr & _K2_THRUSTER_FLAG) == 0
+        )
+        cm_fit = np.ones(self._time_arr.size, dtype=bool)
+        if cadence_mask is not None:
+            cm_fit &= np.asarray(cadence_mask, dtype=bool).ravel()
+        self._cov_clean_mask = (
+            np.isfinite(self._time_arr) & np.isfinite(self._flux_arr) & q_fit & cm_fit
+        )
         valid_xy, _x_tmp, _y_tmp = _coerce_covariates(
             self._time_arr.size,
             x=self._x_arr,
             y=self._y_arr,
             covariates=self._cov_arr,
+            clean_mask=self._cov_clean_mask,
         )
         valid_coords = np.isfinite(self._time_arr) & valid_xy
         full_fit_mask = np.zeros(self._time_arr.size, dtype=bool)
@@ -590,29 +613,64 @@ class K2SCCorrector(_BaseCorrector):
             _fig, ax = plt.subplots(1, 1, figsize=(6.5, 5.5))
 
         res = self.result
-        _valid_xy, x_full, y_full = _coerce_covariates(
+        valid_xy, x_full, y_full = _coerce_covariates(
             self._time_arr.size,
             x=self._x_arr,
             y=self._y_arr,
             covariates=self._cov_arr,
+            clean_mask=self._cov_clean_mask,
         )
-        pos_rel = res.tr_position - float(np.nanmedian(res.tr_position))
-        fin = np.isfinite(x_full) & np.isfinite(y_full) & np.isfinite(pos_rel)
+        fin_pos = np.isfinite(res.tr_position)
+        pos_med = float(np.nanmedian(res.tr_position)) if np.any(fin_pos) else 0.0
+        pos_rel_full = res.tr_position - pos_med
+
+        seg_tfs = res.segment_pca_transforms
+        use_roll_coords = False
+        if seg_tfs is not None and len(seg_tfs) > 1:
+            centers = np.vstack([tf.center_xy for tf in seg_tfs])
+            scales = np.vstack([tf.scales_u for tf in seg_tfs])
+            med_scale = float(np.median(scales))
+            diffs = centers[:, None, :] - centers[None, :, :]
+            max_jump = float(np.max(np.hypot(diffs[:, :, 0], diffs[:, :, 1])))
+            use_roll_coords = max_jump > 10.0 * med_scale
+
+        if use_roll_coords and res.detrender is not None:
+            valid_coords = np.isfinite(self._time_arr) & valid_xy
+            x_plot = res.detrender.data.ux
+            y_plot = res.detrender.data.uy
+            pos_rel = pos_rel_full[valid_coords]
+        else:
+            x_plot = x_full
+            y_plot = y_full
+            pos_rel = pos_rel_full
+
+        fin = np.isfinite(x_plot) & np.isfinite(y_plot) & np.isfinite(pos_rel)
 
         mappable = None
-        if int(fin.sum()) >= 4 and float(np.std(y_full[fin])) > 0.0:
+        if int(fin.sum()) >= 4 and float(np.std(y_plot[fin])) > 0.0:
             try:
-                mappable = ax.tripcolor(x_full[fin], y_full[fin], pos_rel[fin], shading="flat")
+                mappable = ax.tripcolor(
+                    x_plot[fin], y_plot[fin], pos_rel[fin], shading="flat"
+                )
             except (RuntimeError, ValueError):
                 mappable = None
         if mappable is None and np.any(fin):
-            mappable = ax.scatter(x_full[fin], y_full[fin], c=pos_rel[fin], s=16)
+            mappable = ax.scatter(x_plot[fin], y_plot[fin], c=pos_rel[fin], s=16)
 
         if res.detrender is not None:
             tr_x = res.detrender.tr_data.mx
             tr_y = res.detrender.tr_data.my
-            if res.pca_transform is not None:
-                tr_x, tr_y = res.pca_transform.inverse_transform(tr_x, tr_y)
+            if not use_roll_coords:
+                if seg_tfs is not None and len(seg_tfs) > 1:
+                    tr_x, tr_y = inverse_transform_piecewise_roll_pca(
+                        res.detrender.tr_data.masked_time,
+                        tr_x,
+                        tr_y,
+                        res.splits,
+                        seg_tfs,
+                    )
+                elif res.pca_transform is not None:
+                    tr_x, tr_y = res.pca_transform.inverse_transform(tr_x, tr_y)
             ax.plot(
                 tr_x,
                 tr_y,
@@ -626,8 +684,12 @@ class K2SCCorrector(_BaseCorrector):
         if mappable is not None and ax.figure is not None:
             ax.figure.colorbar(mappable, ax=ax, label="Position trend")
 
-        ax.set_xlabel("x covariate")
-        ax.set_ylabel("y covariate")
+        if use_roll_coords:
+            ax.set_xlabel("Roll PC1 (4-MAD normalized)")
+            ax.set_ylabel("Roll PC2 (4-MAD normalized)")
+        else:
+            ax.set_xlabel("x covariate")
+            ax.set_ylabel("y covariate")
         ax.set_title("K2SC 2D Spatial Systematics")
         return ax
 

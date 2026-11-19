@@ -18,6 +18,7 @@ _REL_EPS_GUARD = 64.0
 _SO2_ATOL = 1e-10
 _MIN_PCA_POINTS = 3
 _MIN_TRIM_POINTS = 5
+_DEFAULT_MIN_SEGMENT_POINTS = 20
 
 
 def _orient_and_complete_so2(r1_raw: np.ndarray) -> np.ndarray:
@@ -378,15 +379,263 @@ def fit_roll_pca(x, y, clean_mask=None) -> RollPCATransform:
     )
 
 
+def _normalize_splits(splits) -> np.ndarray:
+    """Return sorted unique finite split timestamps as a 1D float64 array."""
+    if splits is None:
+        return np.empty(0, dtype=np.float64)
+    s_arr = np.asarray(splits, dtype=np.float64).ravel()
+    fin = s_arr[np.isfinite(s_arr)]
+    if fin.size == 0:
+        return np.empty(0, dtype=np.float64)
+    return np.unique(fin)
+
+
+def _segment_indices(time_arr: np.ndarray, splits_clean: np.ndarray) -> np.ndarray:
+    """Map timestamps to segment IDs matching ``PiecewiseSpatialKernel`` (``t > split``).
+
+    Non-finite timestamps receive ``-1`` so they never enter segment fits or
+    piecewise coordinate transforms.
+    """
+    seg = np.full(time_arr.size, -1, dtype=np.int64)
+    fin_t = np.isfinite(time_arr)
+    if not np.any(fin_t):
+        return seg
+    if splits_clean.size == 0:
+        seg[fin_t] = 0
+    else:
+        seg[fin_t] = np.searchsorted(splits_clean, time_arr[fin_t], side="left")
+    return seg
+
+
+def fit_piecewise_roll_pca(
+    time,
+    x,
+    y,
+    splits,
+    clean_mask=None,
+    *,
+    min_points: int = _DEFAULT_MIN_SEGMENT_POINTS,
+) -> tuple[RollPCATransform, ...]:
+    """Fit independent ``RollPCATransform`` objects across piecewise spatial GP splits.
+
+    Partitions cadences using ``np.searchsorted(sorted_splits, time, side="left")``,
+    matching ``PiecewiseSpatialKernel``'s ``t > split`` convention (cadences with
+    ``t == split`` belong to the preceding segment).
+
+    When ``splits`` is ``None`` or contains no finite breakpoints, returns a
+    1-tuple ``(fit_roll_pca(x, y, clean_mask=clean_mask),)`` identical to
+    single-segment fitting.
+
+    When ``splits`` is non-empty, each segment with at least ``min_points`` clean
+    finite cadences receives its own independent ``RollPCATransform``. Any sparser
+    segment is centred locally at its clean (or finite) 2D spatial median while
+    reusing the primary active segment's ``rotation`` and ``scales_u`` (or identity
+    rotation and unit scales ``[1, 1]`` if no segment reaches ``min_points``).
+    """
+    time_arr = np.asarray(time, dtype=np.float64).ravel()
+    x_arr = np.asarray(x, dtype=np.float64).ravel()
+    y_arr = np.asarray(y, dtype=np.float64).ravel()
+    if x_arr.size != y_arr.size or time_arr.size != x_arr.size:
+        raise ValueError(
+            f"Length mismatch: time has {time_arr.size} elements, "
+            f"x has {x_arr.size}, y has {y_arr.size}."
+        )
+
+    min_pts = int(min_points)
+    if min_pts < 1:
+        raise ValueError(f"min_points must be >= 1; got {min_points!r}.")
+
+    if clean_mask is not None:
+        cm = np.asarray(clean_mask, dtype=bool).ravel()
+        if cm.size != x_arr.size:
+            raise ValueError(
+                f"clean_mask length ({cm.size}) != coordinate length ({x_arr.size})."
+            )
+    else:
+        cm = np.ones(x_arr.size, dtype=bool)
+
+    splits_clean = _normalize_splits(splits)
+    if splits_clean.size == 0:
+        return (fit_roll_pca(x_arr, y_arr, clean_mask=clean_mask),)
+
+    n_seg = int(splits_clean.size) + 1
+    seg_idx = _segment_indices(time_arr, splits_clean)
+    fin_all = np.isfinite(time_arr) & np.isfinite(x_arr) & np.isfinite(y_arr)
+    clean_all = fin_all & cm
+    eff_min_pts = max(min_pts, _MIN_PCA_POINTS)
+
+    active: dict[int, RollPCATransform] = {}
+    active_counts: dict[int, int] = {}
+    for seg_id in range(n_seg):
+        in_seg = seg_idx == seg_id
+        seg_clean = in_seg & clean_all
+        n_clean = int(seg_clean.sum())
+        if n_clean >= eff_min_pts:
+            active[seg_id] = fit_roll_pca(
+                x_arr[in_seg], y_arr[in_seg], clean_mask=clean_all[in_seg]
+            )
+            active_counts[seg_id] = n_clean
+
+    if active:
+        primary_seg = max(active_counts, key=lambda idx: (active_counts[idx], -idx))
+        fallback_rot = active[primary_seg].rotation
+        fallback_scales = active[primary_seg].scales_u
+        fallback_center = active[primary_seg].center_xy
+    else:
+        fallback_rot = np.eye(2, dtype=np.float64)
+        fallback_scales = np.ones(2, dtype=np.float64)
+        fallback_center = np.zeros(2, dtype=np.float64)
+
+    transforms: list[RollPCATransform] = []
+    for seg_id in range(n_seg):
+        if seg_id in active:
+            transforms.append(active[seg_id])
+            continue
+        seg_clean = (seg_idx == seg_id) & clean_all
+        seg_fin = (seg_idx == seg_id) & fin_all
+        if np.any(seg_clean):
+            cx, cy = _spatial_median_2d(x_arr[seg_clean], y_arr[seg_clean])
+        elif np.any(seg_fin):
+            cx, cy = _spatial_median_2d(x_arr[seg_fin], y_arr[seg_fin])
+        else:
+            cx, cy = float(fallback_center[0]), float(fallback_center[1])
+        transforms.append(
+            RollPCATransform(
+                center_xy=np.array([cx, cy], dtype=np.float64),
+                rotation=fallback_rot,
+                scales_u=fallback_scales,
+            )
+        )
+
+    return tuple(transforms)
+
+
+def transform_piecewise_roll_pca(
+    time,
+    x,
+    y,
+    splits,
+    segment_transforms: tuple[RollPCATransform, ...] | list[RollPCATransform],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Project ``(x, y)`` into segment-normalized roll coordinates ``(u1, u2)``."""
+    time_arr = np.asarray(time, dtype=np.float64).ravel()
+    x_arr = np.asarray(x, dtype=np.float64).ravel()
+    y_arr = np.asarray(y, dtype=np.float64).ravel()
+    if x_arr.size != y_arr.size or time_arr.size != x_arr.size:
+        raise ValueError(
+            f"Length mismatch: time has {time_arr.size} elements, "
+            f"x has {x_arr.size}, y has {y_arr.size}."
+        )
+
+    splits_clean = _normalize_splits(splits)
+    n_seg = int(splits_clean.size) + 1
+    if len(segment_transforms) != n_seg:
+        raise ValueError(
+            f"Expected {n_seg} segment transforms for {splits_clean.size} splits, "
+            f"got {len(segment_transforms)}."
+        )
+
+    if splits_clean.size == 0:
+        return segment_transforms[0].transform(x_arr, y_arr)
+
+    u1_out = np.full(x_arr.size, np.nan, dtype=np.float64)
+    u2_out = np.full(x_arr.size, np.nan, dtype=np.float64)
+    seg_idx = _segment_indices(time_arr, splits_clean)
+    for seg_id, tf_s in enumerate(segment_transforms):
+        sel = seg_idx == seg_id
+        if np.any(sel):
+            u1_out[sel], u2_out[sel] = tf_s.transform(x_arr[sel], y_arr[sel])
+    return u1_out, u2_out
+
+
+def inverse_transform_piecewise_roll_pca(
+    time,
+    u1,
+    u2,
+    splits,
+    segment_transforms: tuple[RollPCATransform, ...] | list[RollPCATransform],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Map piecewise-normalized roll coordinates ``(u1, u2)`` back to ``(x, y)``."""
+    time_arr = np.asarray(time, dtype=np.float64).ravel()
+    u1_arr = np.asarray(u1, dtype=np.float64).ravel()
+    u2_arr = np.asarray(u2, dtype=np.float64).ravel()
+    if u1_arr.size != u2_arr.size or time_arr.size != u1_arr.size:
+        raise ValueError(
+            f"Length mismatch: time has {time_arr.size} elements, "
+            f"u1 has {u1_arr.size}, u2 has {u2_arr.size}."
+        )
+
+    splits_clean = _normalize_splits(splits)
+    n_seg = int(splits_clean.size) + 1
+    if len(segment_transforms) != n_seg:
+        raise ValueError(
+            f"Expected {n_seg} segment transforms for {splits_clean.size} splits, "
+            f"got {len(segment_transforms)}."
+        )
+
+    if splits_clean.size == 0:
+        return segment_transforms[0].inverse_transform(u1_arr, u2_arr)
+
+    x_out = np.full(u1_arr.size, np.nan, dtype=np.float64)
+    y_out = np.full(u1_arr.size, np.nan, dtype=np.float64)
+    seg_idx = _segment_indices(time_arr, splits_clean)
+    for seg_id, tf_s in enumerate(segment_transforms):
+        sel = seg_idx == seg_id
+        if np.any(sel):
+            x_out[sel], y_out[sel] = tf_s.inverse_transform(u1_arr[sel], u2_arr[sel])
+    return x_out, y_out
+
+
 def pca_normalize_xy(
     x,
     y,
     clean_mask=None,
-) -> tuple[np.ndarray, np.ndarray, RollPCATransform]:
-    """Fit ``RollPCATransform`` on ``(x, y)`` and return ``(u1, u2, transform)``."""
-    tf = fit_roll_pca(x, y, clean_mask=clean_mask)
-    u1, u2 = tf.transform(x, y)
-    return u1, u2, tf
+    time=None,
+    splits=None,
+    *,
+    min_points: int = _DEFAULT_MIN_SEGMENT_POINTS,
+    return_segments: bool = False,
+):
+    """Fit spacecraft-roll PCA on ``(x, y)`` and return ``(u1, u2, transform)``.
+
+    When ``splits`` is ``None`` or empty, fits a single global ``RollPCATransform``
+    identically to ``fit_roll_pca``. When ``splits`` is non-empty, ``time`` must be
+    provided and each spatial segment is normalized with its own transform from
+    ``fit_piecewise_roll_pca`` while returning the global reference transform in
+    the third slot (and optionally the tuple of segment transforms as a fourth
+    return value when ``return_segments=True``).
+    """
+    splits_clean = _normalize_splits(splits)
+    if splits_clean.size == 0:
+        tf = fit_roll_pca(x, y, clean_mask=clean_mask)
+        u1, u2 = tf.transform(x, y)
+        if return_segments:
+            return u1, u2, tf, (tf,)
+        return u1, u2, tf
+
+    if time is None:
+        raise ValueError("`time` must be provided when `splits` is non-empty.")
+
+    seg_tfs = fit_piecewise_roll_pca(
+        time,
+        x,
+        y,
+        splits_clean,
+        clean_mask=clean_mask,
+        min_points=min_points,
+    )
+    u1, u2 = transform_piecewise_roll_pca(time, x, y, splits_clean, seg_tfs)
+    global_tf = fit_roll_pca(x, y, clean_mask=clean_mask)
+    if return_segments:
+        return u1, u2, global_tf, seg_tfs
+    return u1, u2, global_tf
 
 
-__all__ = ["RollPCATransform", "fit_roll_pca", "pca_normalize_xy"]
+__all__ = [
+    "RollPCATransform",
+    "fit_piecewise_roll_pca",
+    "fit_roll_pca",
+    "inverse_transform_piecewise_roll_pca",
+    "pca_normalize_xy",
+    "transform_piecewise_roll_pca",
+]
