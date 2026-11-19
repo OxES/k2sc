@@ -21,8 +21,11 @@ from k2sc.gp import (
     GeorgeGP,
     SplitGP,
     _eval_gp_lnlike_raw,
+    eval_gp_lnlike_and_grad_precomputed_jax,
     eval_gp_lnlike_jax,
     eval_gp_lnlike_masked_jax,
+    eval_gp_lnlike_precomputed_jax,
+    precompute_pairwise_jax,
     predict_components_masked_jax,
 )
 from k2sc.kernels import (
@@ -96,7 +99,9 @@ def test_float64_parity_all_five_kernels_vs_reference_numpy(
     gp = SplitGP(k, splits=splits)
     K1_got, K2_got = gp._covariance_matrix(X_tr, pv=pv, separate=True)
     K_got = gp._covariance_matrix(X_tr, pv=pv, add_wn=True)
-    K1_ref, K2_ref, diag_ref = ref.kernel_matrices_numpy(kname, pv, X_tr, X_tr, splits=splits)
+    K1_ref, K2_ref, diag_ref = ref.kernel_matrices_numpy(
+        kname, pv, X_tr, X_tr, splits=splits
+    )
     K_ref = K1_ref + K2_ref + diag_ref * np.eye(X_tr.shape[0], dtype=np.float64)
     npt.assert_allclose(K1_got, K1_ref, rtol=1e-12, atol=1e-12)
     npt.assert_allclose(K2_got, K2_ref, rtol=1e-12, atol=1e-12)
@@ -107,7 +112,9 @@ def test_float64_parity_all_five_kernels_vs_reference_numpy(
     lnlike_jax = float(
         eval_gp_lnlike_jax(pv, X_tr, y_tr, pad_splits(splits), k.kernel_id)
     )
-    lnlike_ref = ref.gp_lnlikelihood_numpy(kname, pv, X_tr, y_tr, splits=splits, include_const=True)
+    lnlike_ref = ref.gp_lnlikelihood_numpy(
+        kname, pv, X_tr, y_tr, splits=splits, include_const=True
+    )
 
     npt.assert_allclose(lnlike_got, lnlike_ref, rtol=1e-12, atol=1e-12)
     npt.assert_allclose(lnlike_jax, lnlike_ref, rtol=1e-12, atol=1e-12)
@@ -136,7 +143,9 @@ def test_float64_parity_all_five_kernels_vs_reference_numpy(
     npt.assert_allclose(mp_4arg, mu_pos_ref, rtol=1e-12, atol=1e-12)
 
     mt_3arg, mp_3arg = gp.predict_components(pv, y_tr, X_tr)
-    _, _, mt_tr_ref, mp_tr_ref = ref.gp_predict_numpy(kname, pv, X_tr, y_tr, X_tr, splits=splits)
+    _, _, mt_tr_ref, mp_tr_ref = ref.gp_predict_numpy(
+        kname, pv, X_tr, y_tr, X_tr, splits=splits
+    )
     npt.assert_allclose(mt_3arg, mt_tr_ref, rtol=1e-12, atol=1e-12)
     npt.assert_allclose(mp_3arg, mp_tr_ref, rtol=1e-12, atol=1e-12)
 
@@ -172,7 +181,9 @@ def test_high_bjd_time_origin_shifting_precision(canonical_gp_dataset):
     # has zero pre-input rounding difference while still having magnitude ~2.458e6.
     X_tr_bkjd[:, 0] = (X_tr_bkjd[:, 0] + bjd_offset) - bjd_offset
     X_test_bkjd[:, 0] = (X_test_bkjd[:, 0] + bjd_offset) - bjd_offset
-    splits_bkjd = [(s + bjd_offset) - bjd_offset for s in canonical_gp_dataset["splits"]]
+    splits_bkjd = [
+        (s + bjd_offset) - bjd_offset for s in canonical_gp_dataset["splits"]
+    ]
 
     X_tr_bjd = X_tr_bkjd.copy()
     X_tr_bjd[:, 0] += bjd_offset
@@ -226,13 +237,22 @@ def test_legacy_george03_golden_bijection():
             for mode_label, sp in (("unsplit", None), ("split", splits)):
                 prefix = f"{kname}_{mode_label}"
                 gp = SplitGP(kernels[kname](), splits=sp)
-                K1_got, K2_got = gp._covariance_matrix(X_fit, pv=pv_fixed, separate=True)
-                npt.assert_allclose(K1_got, data[f"{prefix}_K1_tr"], rtol=1e-12, atol=1e-12)
-                npt.assert_allclose(K2_got, data[f"{prefix}_K2_tr"], rtol=1e-12, atol=1e-12)
+                K1_got, K2_got = gp._covariance_matrix(
+                    X_fit, pv=pv_fixed, separate=True
+                )
+                npt.assert_allclose(
+                    K1_got, data[f"{prefix}_K1_tr"], rtol=1e-12, atol=1e-12
+                )
+                npt.assert_allclose(
+                    K2_got, data[f"{prefix}_K2_tr"], rtol=1e-12, atol=1e-12
+                )
 
                 ll_got = gp.lnlikelihood(pv_fixed, y_fit, X_fit)
                 npt.assert_allclose(
-                    ll_got, float(data[f"{prefix}_lnlike_george"]), rtol=1e-12, atol=1e-12
+                    ll_got,
+                    float(data[f"{prefix}_lnlike_george"]),
+                    rtol=1e-12,
+                    atol=1e-12,
                 )
                 npt.assert_allclose(
                     ll_got,
@@ -243,10 +263,18 @@ def test_legacy_george03_golden_bijection():
 
                 mu_got, err_got = gp.predict(X_test, mean_only=False)
                 mt_got, mp_got = gp.predict_components(X_test)
-                npt.assert_allclose(mu_got, data[f"{prefix}_mu"], rtol=1e-12, atol=1e-12)
-                npt.assert_allclose(err_got, data[f"{prefix}_err"], rtol=1e-12, atol=1e-12)
-                npt.assert_allclose(mt_got, data[f"{prefix}_mu_time"], rtol=1e-12, atol=1e-12)
-                npt.assert_allclose(mp_got, data[f"{prefix}_mu_pos"], rtol=1e-12, atol=1e-12)
+                npt.assert_allclose(
+                    mu_got, data[f"{prefix}_mu"], rtol=1e-12, atol=1e-12
+                )
+                npt.assert_allclose(
+                    err_got, data[f"{prefix}_err"], rtol=1e-12, atol=1e-12
+                )
+                npt.assert_allclose(
+                    mt_got, data[f"{prefix}_mu_time"], rtol=1e-12, atol=1e-12
+                )
+                npt.assert_allclose(
+                    mp_got, data[f"{prefix}_mu_pos"], rtol=1e-12, atol=1e-12
+                )
 
 
 def test_live_george_parity(canonical_gp_dataset):
@@ -259,11 +287,15 @@ def test_live_george_parity(canonical_gp_dataset):
     y_tr = canonical_gp_dataset["y_tr"]
     pv = np.array([-5.0, 0.4, 6.2, 0.04, -4.8, 16.0, 20.0, -3.5], dtype=np.float64)
 
-    k1_g = (10.0 ** pv[0]) * ExpSine2Kernel(
-        gamma=1.0 / pv[1], log_period=np.log(pv[2]), ndim=3, axes=0
-    ) * ExpSquaredKernel(1.0 / pv[3], ndim=3, axes=0)
-    k2_g = (10.0 ** pv[4]) * ExpKernel(1.0 / pv[5], ndim=3, axes=1) * ExpKernel(
-        1.0 / pv[6], ndim=3, axes=2
+    k1_g = (
+        (10.0 ** pv[0])
+        * ExpSine2Kernel(gamma=1.0 / pv[1], log_period=np.log(pv[2]), ndim=3, axes=0)
+        * ExpSquaredKernel(1.0 / pv[3], ndim=3, axes=0)
+    )
+    k2_g = (
+        (10.0 ** pv[4])
+        * ExpKernel(1.0 / pv[5], ndim=3, axes=1)
+        * ExpKernel(1.0 / pv[6], ndim=3, axes=2)
     )
     gp_g = george.GP(k1_g + k2_g)
     gp_g.compute(X_tr, yerr=10.0 ** pv[7], sort=False)
@@ -284,7 +316,9 @@ def test_live_george_parity(canonical_gp_dataset):
     )
 
 
-def test_block_identity_static_masking_parity_and_zero_recompilation(canonical_gp_dataset):
+def test_block_identity_static_masking_parity_and_zero_recompilation(
+    canonical_gp_dataset,
+):
     X = canonical_gp_dataset["X"].copy()
     y = canonical_gp_dataset["y"].copy()
     splits = canonical_gp_dataset["splits"]
@@ -295,7 +329,9 @@ def test_block_identity_static_masking_parity_and_zero_recompilation(canonical_g
     assert int(np.sum(mask1)) == 64
     assert not mask1[0]
     mask2 = mask1.copy()
-    mask2[10:40] = False  # Simulate second-pass outlier clipping removing additional points
+    mask2[10:40] = (
+        False  # Simulate second-pass outlier clipping removing additional points
+    )
     assert int(np.sum(mask2)) < int(np.sum(mask1))
 
     # Inject NaNs at masked rows (including index 0!) to prove NaN isolation
@@ -349,9 +385,13 @@ def test_block_identity_static_masking_parity_and_zero_recompilation(canonical_g
     assert eval_gp_lnlike_masked_jax._cache_size() == 1
 
 
-_AD_VG = jax.jit(jax.value_and_grad(_eval_gp_lnlike_raw), static_argnames=("kernel_id",))
+_AD_VG = jax.jit(
+    jax.value_and_grad(_eval_gp_lnlike_raw), static_argnames=("kernel_id",)
+)
 _AD_HESS = jax.jit(jax.hessian(_eval_gp_lnlike_raw), static_argnames=("kernel_id",))
-_AD_GRAD_X = jax.jit(jax.grad(_eval_gp_lnlike_raw, argnums=1), static_argnames=("kernel_id",))
+_AD_GRAD_X = jax.jit(
+    jax.grad(_eval_gp_lnlike_raw, argnums=1), static_argnames=("kernel_id",)
+)
 _AD_IDX4 = np.array([0, 14, 34, 56])
 _AD_DUP4 = np.array([0, 5, 6, 36])
 
@@ -460,7 +500,9 @@ def test_float32_pre_import_coercion_and_x64_enforcement(canonical_gp_dataset):
 def test_extreme_low_white_noise_conditioning_and_jitter_fallback():
     """At extreme corner A_t=10, sigma_n=1e-6 with duplicate points, Cholesky failure must not NaN."""
     X_ill = np.zeros((64, 3), dtype=np.float64)
-    X_ill[:, 0] = 2300.0  # Identical timestamps & positions -> rank-1 K_0 = 10 * ones((64, 64))
+    X_ill[:, 0] = (
+        2300.0  # Identical timestamps & positions -> rank-1 K_0 = 10 * ones((64, 64))
+    )
     rng = np.random.default_rng(123)
     y_ill = rng.normal(0.0, 1e-3, size=64)
 
@@ -468,7 +510,9 @@ def test_extreme_low_white_noise_conditioning_and_jitter_fallback():
     pv_singular = np.array([1.0, 0.25, 0.0, 21.0, 21.0, -9.0], dtype=np.float64)
     s_pad = pad_splits(None)
 
-    ll_jax = float(eval_gp_lnlike_jax(pv_singular, X_ill, y_ill, s_pad, BasicKernel.kernel_id))
+    ll_jax = float(
+        eval_gp_lnlike_jax(pv_singular, X_ill, y_ill, s_pad, BasicKernel.kernel_id)
+    )
     assert not np.isnan(ll_jax)
     assert ll_jax == -np.inf
 
@@ -520,7 +564,9 @@ def test_package_metadata_lazy_exports_and_jit_neglnposterior_contract(
 
     # Verify PR 4 _jit_neglnposterior contract (vmap + value_and_grad in & out of bounds)
     @functools.partial(jax.jit, static_argnames=("kernel_id",))
-    def jit_neglnposterior(pv, X_fit, y_fit, splits_padded, lims_low, lims_high, prior_spec, kernel_id):
+    def jit_neglnposterior(
+        pv, X_fit, y_fit, splits_padded, lims_low, lims_high, prior_spec, kernel_id
+    ):
         in_bounds = jnp.all((pv > lims_low) & (pv <= lims_high))
         safe_pv = jnp.clip(pv, lims_low + 1e-12, lims_high - 1e-12)
         ln_p = eval_ln_prior_jax(safe_pv, prior_spec)
@@ -553,3 +599,109 @@ def test_package_metadata_lazy_exports_and_jit_neglnposterior_contract(
     assert np.isposinf(float(vals[1]))
     assert np.all(np.isfinite(np.asarray(grads[0])))
     npt.assert_array_equal(np.asarray(grads[1]), 0.0)
+
+
+@pytest.mark.parametrize(
+    "kname", ["basic", "basic_ep", "quasiperiodic", "quasiperiodic_ep", "periodic"]
+)
+def test_splitgp_and_precompute_two_column_inputs_match_three_column_zero_y(
+    canonical_gp_dataset, kname: str
+):
+    """SplitGP and precompute_pairwise_jax must canonicalize (N, 2) [t, x] to [t, x, 0]."""
+    X_tr_2 = canonical_gp_dataset["X_tr"][:, :2].copy()
+    X_tr_3 = np.column_stack([X_tr_2, np.zeros(X_tr_2.shape[0], dtype=np.float64)])
+    X_test_2 = canonical_gp_dataset["X"][:, :2].copy()
+    X_test_3 = np.column_stack(
+        [X_test_2, np.zeros(X_test_2.shape[0], dtype=np.float64)]
+    )
+    y_tr = canonical_gp_dataset["y_tr"]
+    splits = canonical_gp_dataset["splits"]
+
+    k = kernels[kname]()
+    pv = k.pv0.copy()
+    pv[0] = -4.9
+
+    gp2 = SplitGP(kernels[kname](), splits=splits)
+    gp3 = SplitGP(kernels[kname](), splits=splits)
+
+    ll2 = gp2.lnlikelihood(pv, y_tr, X_tr_2)
+    ll3 = gp3.lnlikelihood(pv, y_tr, X_tr_3)
+    npt.assert_allclose(ll2, ll3, rtol=1e-13, atol=1e-13)
+
+    mu2, err2 = gp2.predict(X_test_2, mean_only=False)
+    mu3, err3 = gp3.predict(X_test_3, mean_only=False)
+    npt.assert_allclose(mu2, mu3, rtol=1e-13, atol=1e-13)
+    npt.assert_allclose(err2, err3, rtol=1e-13, atol=1e-13)
+
+    mt2, mp2 = gp2.predict_components(X_test_2)
+    mt3, mp3 = gp3.predict_components(X_test_3)
+    npt.assert_allclose(mt2, mt3, rtol=1e-13, atol=1e-13)
+    npt.assert_allclose(mp2, mp3, rtol=1e-13, atol=1e-13)
+
+    s_pad = pad_splits(splits)
+    pc2 = precompute_pairwise_jax(jnp.asarray(X_tr_2), s_pad)
+    pc3 = precompute_pairwise_jax(jnp.asarray(X_tr_3), s_pad)
+    lp2 = float(
+        eval_gp_lnlike_precomputed_jax(
+            jnp.asarray(pv), pc2, jnp.asarray(y_tr), k.kernel_id
+        )
+    )
+    lp3 = float(
+        eval_gp_lnlike_precomputed_jax(
+            jnp.asarray(pv), pc3, jnp.asarray(y_tr), k.kernel_id
+        )
+    )
+    npt.assert_allclose(lp2, lp3, rtol=1e-13, atol=1e-13)
+
+    if kname == "basic":
+        for bad_x in (
+            np.zeros((10,), dtype=np.float64),
+            np.zeros((10, 1), dtype=np.float64),
+            np.zeros((10, 4), dtype=np.float64),
+        ):
+            with pytest.raises(ValueError, match=r"\(N, 2\) or \(N, 3\)"):
+                gp2.set_inputs(bad_x)
+            with pytest.raises(ValueError, match=r"\(N, 2\) or \(N, 3\)"):
+                precompute_pairwise_jax(jnp.asarray(bad_x), s_pad)
+
+
+@pytest.mark.parametrize(
+    ("k_cls", "xy_indices"),
+    [(BasicKernelEP, (3, 4)), (QuasiPeriodicKernelEP, (5, 6))],
+)
+def test_ep_zero_iscale_forward_and_analytic_grad_parity(
+    canonical_gp_dataset, k_cls, xy_indices: tuple[int, int]
+):
+    """EP kernels at x_iscale == 0 or y_iscale == 0 must stay finite with zero boundary grad."""
+    X_tr = jnp.asarray(canonical_gp_dataset["X_tr"], dtype=jnp.float64)
+    y_tr = jnp.asarray(canonical_gp_dataset["y_tr"], dtype=jnp.float64)
+    s_pad = pad_splits(canonical_gp_dataset["splits"])
+    precomp = precompute_pairwise_jax(X_tr, s_pad)
+
+    k = k_cls()
+    base_pv = k.pv0.copy()
+    base_pv[0] = -4.8
+
+    for zero_subset in ((xy_indices[0],), (xy_indices[1],), xy_indices):
+        pv = base_pv.copy()
+        for idx in zero_subset:
+            pv[idx] = 0.0
+        pv_j = jnp.asarray(pv, dtype=jnp.float64)
+
+        lp_fwd = float(eval_gp_lnlike_precomputed_jax(pv_j, precomp, y_tr, k.kernel_id))
+        lp_ana, grad_ana = eval_gp_lnlike_and_grad_precomputed_jax(
+            pv_j, precomp, y_tr, k.kernel_id
+        )
+        lp_raw, grad_raw = _AD_VG(pv_j, X_tr, y_tr, s_pad, k.kernel_id)
+
+        assert np.isfinite(lp_fwd)
+        npt.assert_allclose(float(lp_ana), lp_fwd, rtol=1e-13, atol=1e-13)
+        npt.assert_allclose(float(lp_raw), lp_fwd, rtol=1e-13, atol=1e-13)
+        assert np.all(np.isfinite(np.asarray(grad_ana)))
+        assert np.all(np.isfinite(np.asarray(grad_raw)))
+        npt.assert_allclose(
+            np.asarray(grad_ana), np.asarray(grad_raw), rtol=1e-11, atol=1e-11
+        )
+        for idx in zero_subset:
+            assert float(grad_ana[idx]) == 0.0
+            assert float(grad_raw[idx]) == 0.0

@@ -30,6 +30,8 @@ from .kernels import (
     pad_splits,
 )
 from .priors import (
+    PRIOR_LOGNORM,
+    PRIOR_NORMAL,
     LogNormPrior,
     NormalPrior,
     PriorSpec,
@@ -67,30 +69,47 @@ def _sanitize_pv_bounds(
     pv: jax.Array,
     lims_low: jax.Array,
     lims_high: jax.Array,
+    prior_spec: PriorSpec | None = None,
+    kernel_id: int | None = None,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
     pv_arr = as_f64(pv)
     low_arr = as_f64(lims_low)
     high_arr = as_f64(lims_high)
 
+    if prior_spec is not None:
+        strict_pos = prior_spec.kind == PRIOR_LOGNORM
+    else:
+        strict_pos = jnp.zeros(pv_arr.shape, dtype=jnp.bool_)
+    if (
+        kernel_id is not None
+        and int(kernel_id) in _PERIODIC_KERNEL_IDS
+        and pv_arr.shape[0] > 2
+    ):
+        strict_pos = strict_pos.at[2].set(True)
+
     in_bounds = jnp.all(
-        jnp.isfinite(pv_arr) & (pv_arr > low_arr) & (pv_arr <= high_arr)
+        jnp.isfinite(pv_arr)
+        & (pv_arr >= low_arr)
+        & (pv_arr <= high_arr)
+        & (~strict_pos | (pv_arr > 0.0))
     )
 
     # Well-conditioned interior fallback when pv is out-of-bounds or non-finite,
     # avoiding NaN cotangents in the unselected branch of jnp.where under grad/vmap.
-    both_fin = jnp.isfinite(low_arr) & jnp.isfinite(high_arr)
+    eff_low = jnp.where(strict_pos, jnp.maximum(low_arr, 0.0), low_arr)
+    both_fin = jnp.isfinite(eff_low) & jnp.isfinite(high_arr)
     fallback = jnp.where(
         both_fin,
-        0.5 * (low_arr + high_arr),
+        0.5 * (eff_low + high_arr),
         jnp.where(
-            jnp.isfinite(low_arr),
-            low_arr + 1.0,
+            jnp.isfinite(eff_low),
+            eff_low + 1.0,
             jnp.where(jnp.isfinite(high_arr), high_arr - 1.0, 0.0),
         ),
     )
+    fallback = jnp.where(strict_pos & (fallback <= 0.0), 1.0, fallback)
     pv_eval = jnp.where(in_bounds, pv_arr, fallback)
-    safe_pv = jnp.clip(pv_eval, low_arr + 1e-12, high_arr - 1e-12)
-    return in_bounds, pv_eval, safe_pv, low_arr, high_arr
+    return in_bounds, pv_eval, pv_eval, low_arr, high_arr
 
 
 def _neglnposterior_impl(
@@ -103,7 +122,9 @@ def _neglnposterior_impl(
     prior_spec: PriorSpec,
     kernel_id: int,
 ) -> jax.Array:
-    in_bounds, _, safe_pv, _, _ = _sanitize_pv_bounds(pv, lims_low, lims_high)
+    in_bounds, _, safe_pv, _, _ = _sanitize_pv_bounds(
+        pv, lims_low, lims_high, prior_spec=prior_spec, kernel_id=kernel_id
+    )
     ln_p = eval_ln_prior_jax(safe_pv, prior_spec)
     ln_l = eval_gp_lnlike_jax(safe_pv, X_fit, y_fit, splits_padded, kernel_id)
     raw_nll = -(ln_p + ln_l)
@@ -124,7 +145,9 @@ def _neglnposterior_precomputed_impl(
     prior_spec: PriorSpec,
     kernel_id: int,
 ) -> jax.Array:
-    in_bounds, _, safe_pv, _, _ = _sanitize_pv_bounds(pv, lims_low, lims_high)
+    in_bounds, _, safe_pv, _, _ = _sanitize_pv_bounds(
+        pv, lims_low, lims_high, prior_spec=prior_spec, kernel_id=kernel_id
+    )
     ln_p = eval_ln_prior_jax(safe_pv, prior_spec)
     ln_l = _eval_gp_lnlike_precomputed_raw(safe_pv, precomp, y_fit, kernel_id)
     raw_nll = -(ln_p + ln_l)
@@ -145,16 +168,15 @@ def _val_and_grad_precomputed_impl(
     prior_spec: PriorSpec,
     kernel_id: int,
 ) -> tuple[jax.Array, jax.Array]:
-    in_bounds, pv_eval, safe_pv, low_arr, high_arr = _sanitize_pv_bounds(
-        pv, lims_low, lims_high
+    in_bounds, _, safe_pv, _, _ = _sanitize_pv_bounds(
+        pv, lims_low, lims_high, prior_spec=prior_spec, kernel_id=kernel_id
     )
     ln_p, grad_ln_p = jax.value_and_grad(eval_ln_prior_jax)(safe_pv, prior_spec)
     ln_l, grad_ln_l = _eval_gp_lnlike_and_grad_precomputed_raw(
         safe_pv, precomp, y_fit, kernel_id
     )
     raw_nll = -(ln_p + ln_l)
-    clip_active = (pv_eval >= low_arr + 1e-12) & (pv_eval <= high_arr - 1e-12)
-    raw_grad = jnp.where(clip_active, -(grad_ln_p + grad_ln_l), 0.0)
+    raw_grad = -(grad_ln_p + grad_ln_l)
     ok = in_bounds & jnp.isfinite(raw_nll) & jnp.all(jnp.isfinite(raw_grad))
     val = jnp.where(ok, raw_nll, jnp.inf)
     safe_grad = jnp.where(ok, raw_grad, jnp.zeros_like(raw_grad))
@@ -266,6 +288,47 @@ def compute_closed_lims(lims) -> list[tuple[float, float]]:
     return closed
 
 
+def compute_box_bounds(
+    lims,
+    prior_spec: PriorSpec | None = None,
+    kernel_id: int | None = None,
+) -> list[tuple[float, float]]:
+    """Construct exact box bounds for L-BFGS-B, lifting low to 1e-8 only for LogNorm/period low <= 0."""
+    low, high = _parse_lims_arrays(lims)
+    kinds = (
+        np.asarray(prior_spec.kind, dtype=np.int32)
+        if prior_spec is not None
+        else np.full(low.shape, -1, dtype=np.int32)
+    )
+    is_periodic = kernel_id is not None and int(kernel_id) in _PERIODIC_KERNEL_IDS
+    bounds: list[tuple[float, float]] = []
+    for k, (a_k, b_k) in enumerate(zip(low, high, strict=True)):
+        lo = float(a_k)
+        hi = float(b_k)
+        if np.isfinite(lo) and np.isfinite(hi) and hi <= lo:
+            raise ValueError(f"Invalid parameter limits ({a_k}, {b_k}).")
+        needs_pos = int(kinds[k]) == PRIOR_LOGNORM or (is_periodic and k == 2)
+        if needs_pos and lo <= 0.0:
+            eps = 1e-8 if (not np.isfinite(hi) or hi > 2e-8) else 0.5 * hi
+            lo = max(lo, eps)
+        bounds.append((lo, hi))
+    return bounds
+
+
+def _resolve_kernel_bounds(
+    kernel: DtKernel,
+    c_low: np.ndarray,
+    c_high: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return finite (b_low, b_high) box arrays, falling back to (c_low, c_high) when kernel.bounds is unset."""
+    k_bounds = np.asarray(kernel.bounds, dtype=np.float64)
+    if k_bounds.shape != (kernel.npar, 2):
+        return c_low.copy(), c_high.copy()
+    b_low = np.where(np.isfinite(k_bounds[:, 0]), k_bounds[:, 0], c_low)
+    b_high = np.where(np.isfinite(k_bounds[:, 1]), k_bounds[:, 1], c_high)
+    return b_low, b_high
+
+
 def _finite_box_bounds(
     closed_lims: list[tuple[float, float]],
     kernel: DtKernel,
@@ -275,11 +338,20 @@ def _finite_box_bounds(
     low = c_arr[:, 0].copy()
     high = c_arr[:, 1].copy()
     k_bounds = np.asarray(kernel.bounds, dtype=np.float64)
+    has_kb = k_bounds.ndim == 2 and k_bounds.shape[1] == 2
     for k in range(low.size):
         if not np.isfinite(low[k]):
-            low[k] = float(k_bounds[k, 0] - 10.0) if k < k_bounds.shape[0] else -10.0
+            low[k] = (
+                float(k_bounds[k, 0] - 10.0)
+                if (has_kb and k < k_bounds.shape[0] and np.isfinite(k_bounds[k, 0]))
+                else -10.0
+            )
         if not np.isfinite(high[k]):
-            high[k] = float(k_bounds[k, 1] + 10.0) if k < k_bounds.shape[0] else 10.0
+            high[k] = (
+                float(k_bounds[k, 1] + 10.0)
+                if (has_kb and k < k_bounds.shape[0] and np.isfinite(k_bounds[k, 1]))
+                else 10.0
+            )
     return low, high
 
 
@@ -392,9 +464,9 @@ def _generate_candidates(
     n_sobol = round(0.70 * n_rem)
     n_prior = n_rem - n_sobol
 
-    k_bounds = np.asarray(kernel.bounds, dtype=np.float64)
-    b_low = np.clip(k_bounds[:, 0], c_low, c_high)
-    b_high = np.clip(k_bounds[:, 1], c_low, c_high)
+    b_low_raw, b_high_raw = _resolve_kernel_bounds(kernel, c_low, c_high)
+    b_low = np.clip(b_low_raw, c_low, c_high)
+    b_high = np.clip(b_high_raw, c_low, c_high)
     bad_box = b_high <= b_low
     b_low = np.where(bad_box, c_low, b_low)
     b_high = np.where(bad_box, c_high, b_high)
@@ -411,7 +483,10 @@ def _generate_candidates(
             p_hi_s = min(max(p_lo_s * 1.5, float(b_high[2])), float(c_high[2]))
             if p_hi_s > p_lo_s:
                 sobol_pts[:, 2] = np.clip(
-                    np.exp(np.log(p_lo_s) + u_sobol[:, 2] * (np.log(p_hi_s) - np.log(p_lo_s))),
+                    np.exp(
+                        np.log(p_lo_s)
+                        + u_sobol[:, 2] * (np.log(p_hi_s) - np.log(p_lo_s))
+                    ),
                     c_low[2],
                     c_high[2],
                 )
@@ -430,7 +505,10 @@ def _generate_candidates(
     if n_prior > 0:
         prior_pts = np.empty((n_prior, npar), dtype=np.float64)
         is_periodic_kernel = kernel.kernel_id in _PERIODIC_KERNEL_IDS
-        is_qp_kernel = kernel.kernel_id in (KERNEL_QUASIPERIODIC, KERNEL_QUASIPERIODIC_EP)
+        is_qp_kernel = kernel.kernel_id in (
+            KERNEL_QUASIPERIODIC,
+            KERNEL_QUASIPERIODIC_EP,
+        )
         log10_yvar = (
             float(np.clip(np.log10(max(y_var, 1e-10)), -6.5, -1.0))
             if (y_var is not None and np.isfinite(y_var) and y_var > 0.0)
@@ -509,7 +587,9 @@ def _generate_candidates(
                 wn_hi = min(-2.5, hi_k)
                 if wn_hi <= wn_lo:
                     wn_lo, wn_hi = lo_k, hi_k
-                u_strat = (np.arange(n_prior, dtype=np.float64) + rng.random(n_prior)) / n_prior
+                u_strat = (
+                    np.arange(n_prior, dtype=np.float64) + rng.random(n_prior)
+                ) / n_prior
                 rng.shuffle(u_strat)
                 prior_pts[:, k] = np.clip(wn_lo + u_strat * (wn_hi - wn_lo), lo_k, hi_k)
             elif is_qp_kernel and k == 3:
@@ -517,12 +597,18 @@ def _generate_candidates(
                 # so cycle-to-cycle ExpSineSquared correlations are not damped out at lag P.
                 n_coh = round(0.75 * n_prior)
                 n_broad = n_prior - n_coh
-                tau_coh = prior_pts[:n_coh, 2] * np.exp(rng.uniform(np.log(1.5), np.log(8.0), size=n_coh))
+                tau_coh = prior_pts[:n_coh, 2] * np.exp(
+                    rng.uniform(np.log(1.5), np.log(8.0), size=n_coh)
+                )
                 ev_coh = np.clip(1.0 / np.square(np.maximum(tau_coh, 0.5)), lo_k, hi_k)
                 ln_lo = np.log(max(lo_k, 1e-12))
                 ln_hi = np.log(max(hi_k, lo_k + 1e-9))
                 ev_broad = np.clip(
-                    np.exp(_sample_truncated_normal(rng, prior.mu, prior.sigma, ln_lo, ln_hi, n_broad)),
+                    np.exp(
+                        _sample_truncated_normal(
+                            rng, prior.mu, prior.sigma, ln_lo, ln_hi, n_broad
+                        )
+                    ),
                     lo_k,
                     hi_k,
                 )
@@ -567,14 +653,18 @@ def _generate_candidates(
                 anchor[2] = p_h
                 if is_qp_kernel:
                     tau_h = max(3.0 * p_h, 1.0)
-                    anchor[3] = float(np.clip(1.0 / (tau_h * tau_h), c_low[3], c_high[3]))
+                    anchor[3] = float(
+                        np.clip(1.0 / (tau_h * tau_h), c_low[3], c_high[3])
+                    )
                     xy_idx = 4
                 else:
                     # PeriodicKernel: long-term smooth amplitude & inverse scale at indices 3, 4
                     anchor[3] = float(np.clip(log10_yvar - 0.5, c_low[3], c_high[3]))
                     anchor[4] = float(np.clip(0.01, c_low[4], c_high[4]))
                     xy_idx = 5
-                anchor[xy_idx] = float(np.clip(log10_yvar, c_low[xy_idx], c_high[xy_idx]))
+                anchor[xy_idx] = float(
+                    np.clip(log10_yvar, c_low[xy_idx], c_high[xy_idx])
+                )
                 anchor[-1] = float(np.clip(-3.8, c_low[-1], c_high[-1]))
                 prior_pts[h_idx] = anchor
 
@@ -699,6 +789,77 @@ def _make_scipy_host_callback(
     return _val_and_grad_host, counts
 
 
+def _compute_coordinate_scales(
+    x0: np.ndarray,
+    box_low: np.ndarray,
+    box_high: np.ndarray,
+    prior_spec: PriorSpec,
+    kernel_id: int | None = None,
+    kernel_bounds=None,
+) -> np.ndarray:
+    """Compute positive characteristic scales sigma_k for dimensionless L-BFGS-B preconditioning."""
+    npar = x0.size
+    kinds = np.asarray(prior_spec.kind, dtype=np.int32)
+    prior_sigmas = np.asarray(prior_spec.sigma, dtype=np.float64)
+    kb = None
+    if kernel_bounds is not None:
+        kb_arr = np.asarray(kernel_bounds, dtype=np.float64)
+        if kb_arr.shape == (npar, 2):
+            kb = kb_arr
+
+    is_periodic = kernel_id is not None and int(kernel_id) in _PERIODIC_KERNEL_IDS
+    scales = np.ones(npar, dtype=np.float64)
+    for k in range(npar):
+        lo_k = float(box_low[k])
+        hi_k = float(box_high[k])
+        span = hi_k - lo_k if (np.isfinite(lo_k) and np.isfinite(hi_k)) else np.inf
+        kb_span = (
+            float(kb[k, 1] - kb[k, 0])
+            if (
+                kb is not None
+                and np.isfinite(kb[k, 0])
+                and np.isfinite(kb[k, 1])
+                and kb[k, 1] > kb[k, 0]
+            )
+            else np.inf
+        )
+        kind_k = int(kinds[k]) if k < kinds.size else -1
+
+        if kind_k == PRIOR_NORMAL:
+            s = (
+                float(prior_sigmas[k])
+                if (
+                    k < prior_sigmas.size
+                    and np.isfinite(prior_sigmas[k])
+                    and prior_sigmas[k] > 0.0
+                )
+                else 1.0
+            )
+            if np.isfinite(span):
+                s = min(s, 0.5 * span)
+        elif kind_k == PRIOR_LOGNORM:
+            s = max(abs(float(x0[k])), 0.02)
+            cap = min(0.5 * span, kb_span)
+            if np.isfinite(cap) and cap > 0.0:
+                s = min(s, cap)
+        elif is_periodic and k == 2:
+            s = max(0.25 * abs(float(x0[k])), 0.05)
+            cap = min(0.5 * span, kb_span)
+            if np.isfinite(cap) and cap > 0.0:
+                s = min(s, cap)
+        else:
+            if np.isfinite(kb_span):
+                s = min(kb_span, span) if np.isfinite(span) else kb_span
+            elif np.isfinite(span):
+                s = 0.5 * span
+            else:
+                s = max(abs(float(x0[k])), 1.0)
+
+        min_s = 1e-8 * span if np.isfinite(span) else 1e-8
+        scales[k] = max(float(s), min_s, 1e-12)
+    return scales
+
+
 def polish_lbfgsb(
     x0: np.ndarray,
     X_fit_jax: jax.Array,
@@ -708,16 +869,46 @@ def polish_lbfgsb(
     lims_high_jax: jax.Array,
     prior_spec: PriorSpec,
     kernel_id: int,
-    closed_lims: list[tuple[float, float]],
+    closed_lims: list[tuple[float, float]] | None = None,
     ftol: float = 1e-9,
     gtol: float = 1e-6,
     maxiter: int = 200,
     precomp: PrecomputedPairwise | None = None,
+    kernel_bounds=None,
 ) -> OptimizationResult:
-    """Run bounded exact-gradient SciPy L-BFGS-B polish from a starting point x0."""
+    """Run scale-invariant bounded exact-gradient SciPy L-BFGS-B polish from x0."""
     t0 = time.perf_counter()
-    c_arr = np.asarray(closed_lims, dtype=np.float64)
-    x0_clipped = np.clip(np.asarray(x0, dtype=np.float64), c_arr[:, 0], c_arr[:, 1])
+    if closed_lims is None:
+        raw_lims = np.vstack(
+            [
+                np.asarray(lims_low_jax, dtype=np.float64),
+                np.asarray(lims_high_jax, dtype=np.float64),
+            ]
+        )
+        eff_bounds = compute_box_bounds(
+            raw_lims, prior_spec=prior_spec, kernel_id=kernel_id
+        )
+    else:
+        eff_bounds = compute_box_bounds(
+            closed_lims, prior_spec=prior_spec, kernel_id=kernel_id
+        )
+    c_arr = np.asarray(eff_bounds, dtype=np.float64)
+    box_low = c_arr[:, 0]
+    box_high = c_arr[:, 1]
+    x0_clipped = np.clip(np.asarray(x0, dtype=np.float64), box_low, box_high)
+
+    scales = _compute_coordinate_scales(
+        x0_clipped,
+        box_low,
+        box_high,
+        prior_spec,
+        kernel_id=kernel_id,
+        kernel_bounds=kernel_bounds,
+    )
+    ref = x0_clipped.copy()
+    theta_low = np.where(np.isfinite(box_low), (box_low - ref) / scales, -np.inf)
+    theta_high = np.where(np.isfinite(box_high), (box_high - ref) / scales, np.inf)
+    theta_bounds = list(zip(theta_low.tolist(), theta_high.tolist(), strict=True))
 
     pc = (
         precompute_pairwise_jax(X_fit_jax, splits_padded)
@@ -737,16 +928,27 @@ def polish_lbfgsb(
 
     init_val, init_grad = host_vg.eval_exact(x0_clipped)  # type: ignore[attr-defined]
 
+    def _scaled_host_vg(theta: np.ndarray) -> tuple[float, np.ndarray]:
+        theta_arr = np.asarray(theta, dtype=np.float64)
+        p = np.clip(ref + scales * theta_arr, box_low, box_high)
+        val, grad_p = host_vg(p)
+        grad_theta = scales * grad_p
+        if not np.isfinite(val) or not np.all(np.isfinite(grad_theta)):
+            return 1e30, np.zeros_like(theta_arr, dtype=np.float64)
+        return val, grad_theta
+
     res = minimize(
-        host_vg,
-        x0_clipped,
+        _scaled_host_vg,
+        np.zeros_like(x0_clipped),
         method="L-BFGS-B",
         jac=True,
-        bounds=closed_lims,
+        bounds=theta_bounds,
         options={"ftol": ftol, "gtol": gtol, "maxiter": maxiter},
     )
 
-    cand_x = np.clip(np.asarray(res.x, dtype=np.float64), c_arr[:, 0], c_arr[:, 1])
+    cand_x = np.clip(
+        ref + scales * np.asarray(res.x, dtype=np.float64), box_low, box_high
+    )
     fin_val, fin_grad = host_vg.eval_exact(cand_x)  # type: ignore[attr-defined]
 
     if np.isfinite(init_val) and (not np.isfinite(fin_val) or init_val < fin_val):
@@ -758,7 +960,9 @@ def polish_lbfgsb(
         best_val = fin_val
         best_grad = fin_grad
 
-    grad_norm = _box_projected_grad_norm(best_x, best_grad, c_arr[:, 0], c_arr[:, 1])
+    grad_norm = _box_projected_grad_norm(
+        best_x, best_grad, box_low, box_high, scales=scales
+    )
     msg = res.message if isinstance(res.message, str) else str(res.message)
     success = bool(np.isfinite(best_val) and (res.success or grad_norm < 1e-2))
 
@@ -780,11 +984,16 @@ def _box_projected_grad_norm(
     grad: np.ndarray,
     c_low: np.ndarray,
     c_high: np.ndarray,
+    scales: np.ndarray | None = None,
 ) -> float:
     if not np.all(np.isfinite(grad)):
         return float("inf")
-    proj = pv - np.clip(pv - grad, c_low, c_high)
-    return float(np.linalg.norm(proj))
+    if scales is None:
+        proj = pv - np.clip(pv - grad, c_low, c_high)
+        return float(np.linalg.norm(proj))
+    s = np.asarray(scales, dtype=np.float64)
+    proj_theta = (pv - np.clip(pv - (s * s) * grad, c_low, c_high)) / s
+    return float(np.linalg.norm(proj_theta))
 
 
 class MultiStartLBFGSBOptimizer:
@@ -828,9 +1037,7 @@ class MultiStartLBFGSBOptimizer:
         y_jax = as_f64(y_fit)
         splits_pad = pad_splits(splits)
         precomp = (
-            precompute_pairwise_jax(X_jax, splits_pad)
-            if precomp is None
-            else precomp
+            precompute_pairwise_jax(X_jax, splits_pad) if precomp is None else precomp
         )
         lims_low_jax = as_f64(kernel.lims[0])
         lims_high_jax = as_f64(kernel.lims[1])
@@ -865,9 +1072,7 @@ class MultiStartLBFGSBOptimizer:
         total_nfev = int(candidates.shape[0])
         total_njev = 0
 
-        k_bounds = np.asarray(kernel.bounds, dtype=np.float64)
-        norm_low = np.where(np.isfinite(k_bounds[:, 0]), k_bounds[:, 0], c_low)
-        norm_high = np.where(np.isfinite(k_bounds[:, 1]), k_bounds[:, 1], c_high)
+        norm_low, norm_high = _resolve_kernel_bounds(kernel, c_low, c_high)
         seeds = _select_diverse_top_k(
             candidates,
             energies,
@@ -878,6 +1083,9 @@ class MultiStartLBFGSBOptimizer:
             is_periodic=is_per,
         )
 
+        lbfgs_bounds = compute_box_bounds(
+            kernel.lims, prior_spec=kernel.prior_spec, kernel_id=kernel.kernel_id
+        )
         best_res: OptimizationResult | None = None
         for x_seed in seeds:
             pol = polish_lbfgsb(
@@ -889,11 +1097,12 @@ class MultiStartLBFGSBOptimizer:
                 lims_high_jax,
                 kernel.prior_spec,
                 kernel.kernel_id,
-                closed_lims,
+                lbfgs_bounds,
                 ftol=self.ftol,
                 gtol=self.gtol,
                 maxiter=self.maxiter,
                 precomp=precomp,
+                kernel_bounds=kernel.bounds,
             )
             total_nfev += pol.nfev
             total_njev += pol.njev
@@ -905,7 +1114,10 @@ class MultiStartLBFGSBOptimizer:
             pv=best_res.pv,
             fun=best_res.fun,
             grad_norm=best_res.grad_norm,
-            success=bool(np.isfinite(best_res.fun) and (best_res.success or best_res.grad_norm < 1.0)),
+            success=bool(
+                np.isfinite(best_res.fun)
+                and (best_res.success or best_res.grad_norm < 1.0)
+            ),
             nfev=total_nfev,
             njev=total_njev,
             runtime_sec=time.perf_counter() - t0,
@@ -963,9 +1175,7 @@ class VectorizedDEOptimizer:
         y_jax = as_f64(y_fit)
         splits_pad = pad_splits(splits)
         precomp = (
-            precompute_pairwise_jax(X_jax, splits_pad)
-            if precomp is None
-            else precomp
+            precompute_pairwise_jax(X_jax, splits_pad) if precomp is None else precomp
         )
         lims_low_jax = as_f64(kernel.lims[0])
         lims_high_jax = as_f64(kernel.lims[1])
@@ -1072,10 +1282,10 @@ class VectorizedDEOptimizer:
         pop = np.asarray(de_res.population, dtype=np.float64)
         pop_en = np.asarray(de_res.population_energies, dtype=np.float64)
         pool_x = np.concatenate([pop, *archive_x], axis=0) if archive_x else pop
-        pool_en = np.concatenate([pop_en, *archive_en], axis=0) if archive_en else pop_en
-        k_bounds = np.asarray(kernel.bounds, dtype=np.float64)
-        norm_low = np.where(np.isfinite(k_bounds[:, 0]), k_bounds[:, 0], c_low)
-        norm_high = np.where(np.isfinite(k_bounds[:, 1]), k_bounds[:, 1], c_high)
+        pool_en = (
+            np.concatenate([pop_en, *archive_en], axis=0) if archive_en else pop_en
+        )
+        norm_low, norm_high = _resolve_kernel_bounds(kernel, c_low, c_high)
         seeds = _select_diverse_top_k(
             pool_x,
             pool_en,
@@ -1086,6 +1296,9 @@ class VectorizedDEOptimizer:
             is_periodic=is_per,
         )
 
+        lbfgs_bounds = compute_box_bounds(
+            kernel.lims, prior_spec=kernel.prior_spec, kernel_id=kernel.kernel_id
+        )
         total_nfev = int(eval_state["nfev"])
         total_njev = 0
         best_res: OptimizationResult | None = None
@@ -1099,11 +1312,12 @@ class VectorizedDEOptimizer:
                 lims_high_jax,
                 kernel.prior_spec,
                 kernel.kernel_id,
-                closed_lims,
+                lbfgs_bounds,
                 ftol=self.ftol,
                 gtol=self.gtol,
                 maxiter=self.maxiter_polish,
                 precomp=precomp,
+                kernel_bounds=kernel.bounds,
             )
             total_nfev += pol.nfev
             total_njev += pol.njev
@@ -1116,7 +1330,10 @@ class VectorizedDEOptimizer:
             pv=best_res.pv,
             fun=best_res.fun,
             grad_norm=best_res.grad_norm,
-            success=bool(np.isfinite(best_res.fun) and (best_res.success or best_res.grad_norm < 1.0)),
+            success=bool(
+                np.isfinite(best_res.fun)
+                and (best_res.success or best_res.grad_norm < 1.0)
+            ),
             nfev=total_nfev,
             njev=total_njev,
             runtime_sec=time.perf_counter() - t0,
@@ -1207,6 +1424,27 @@ _lnlike_precomputed_optx.defvjp(
 )
 
 
+def _optx_saturation_wall_jax(
+    z: jax.Array,
+    c_low: jax.Array,
+    c_high: jax.Array,
+) -> jax.Array:
+    """Quadratic saturation penalty arresting z runaway beyond |z| > 14 in bounded directions."""
+    both_fin = jnp.isfinite(c_low) & jnp.isfinite(c_high)
+    only_low = jnp.isfinite(c_low) & ~jnp.isfinite(c_high)
+    only_high = ~jnp.isfinite(c_low) & jnp.isfinite(c_high)
+    z_excess = jnp.select(
+        [both_fin, only_low, only_high],
+        [
+            jnp.maximum(0.0, jnp.abs(z) - 14.0),
+            jnp.maximum(0.0, -z - 14.0),
+            jnp.maximum(0.0, z - 14.0),
+        ],
+        default=0.0,
+    )
+    return 1e-8 * jnp.sum(jnp.square(z_excess))
+
+
 _OPTX_VMAP_SOLVER_CACHE: dict[tuple[int, int, float, float], Any] = {}
 
 
@@ -1234,17 +1472,19 @@ def _get_optx_batch_solver(
     def _loss_z(z: jax.Array, args) -> jax.Array:
         precomp, y_fit, lims_low, lims_high, c_low, c_high, prior_spec = args
         pv = _unconstrained_to_pv_jax(z, c_low, c_high)
-        in_bounds, _, safe_pv, _, _ = _sanitize_pv_bounds(pv, lims_low, lims_high)
+        in_bounds, _, safe_pv, _, _ = _sanitize_pv_bounds(
+            pv, lims_low, lims_high, prior_spec=prior_spec, kernel_id=kernel_id
+        )
         ln_p = eval_ln_prior_jax(safe_pv, prior_spec)
         ln_l = _lnlike_precomputed_optx(safe_pv, precomp, y_fit, kernel_id)
         raw_nll = -(ln_p + ln_l)
         val = jnp.where(in_bounds & jnp.isfinite(raw_nll), raw_nll, jnp.inf)
-        # Arrest unconstrained z runaway beyond |z| > 14 (where sigmoid saturates within
-        # <1e-6 of closed_lims) while remaining identically 0 throughout |z| <= 14.
-        both_fin = jnp.isfinite(c_low) & jnp.isfinite(c_high)
-        z_excess = jnp.where(both_fin, jnp.maximum(0.0, jnp.abs(z) - 14.0), 0.0)
-        wall = 1e-8 * jnp.sum(jnp.square(z_excess))
-        return jnp.where(jnp.isfinite(val), val + wall, jnp.asarray(1e30, dtype=jnp.float64))
+        # Arrest unconstrained z runaway in saturated directions beyond |z| > 14
+        # while remaining identically 0 throughout the active non-saturated interior.
+        wall = _optx_saturation_wall_jax(z, c_low, c_high)
+        return jnp.where(
+            jnp.isfinite(val), val + wall, jnp.asarray(1e30, dtype=jnp.float64)
+        )
 
     def _solve_one(z0: jax.Array, args):
         sol = optx.minimise(
@@ -1329,9 +1569,7 @@ class OptimistixOptimizer:
         y_jax = as_f64(y_fit)
         splits_pad = pad_splits(splits)
         precomp = (
-            precompute_pairwise_jax(X_jax, splits_pad)
-            if precomp is None
-            else precomp
+            precompute_pairwise_jax(X_jax, splits_pad) if precomp is None else precomp
         )
         lims_low_jax = as_f64(kernel.lims[0])
         lims_high_jax = as_f64(kernel.lims[1])
@@ -1367,9 +1605,7 @@ class OptimistixOptimizer:
             precomp=precomp,
         )
 
-        k_bounds = np.asarray(kernel.bounds, dtype=np.float64)
-        norm_low = np.where(np.isfinite(k_bounds[:, 0]), k_bounds[:, 0], c_low_fin)
-        norm_high = np.where(np.isfinite(k_bounds[:, 1]), k_bounds[:, 1], c_high_fin)
+        norm_low, norm_high = _resolve_kernel_bounds(kernel, c_low_fin, c_high_fin)
         seeds = _select_diverse_top_k(
             candidates,
             energies,
@@ -1429,7 +1665,17 @@ class OptimistixOptimizer:
                 best_grad = np.asarray(grad_j, dtype=np.float64)
                 best_ok = bool(cand_ok)
 
-        grad_norm = _box_projected_grad_norm(best_pv, best_grad, c_low_raw, c_high_raw)
+        optx_scales = _compute_coordinate_scales(
+            best_pv,
+            c_low_raw,
+            c_high_raw,
+            kernel.prior_spec,
+            kernel_id=kernel.kernel_id,
+            kernel_bounds=kernel.bounds,
+        )
+        grad_norm = _box_projected_grad_norm(
+            best_pv, best_grad, c_low_raw, c_high_raw, scales=optx_scales
+        )
         success = bool(np.isfinite(best_val) and (best_ok or grad_norm < 1.0))
         msg = (
             "Optimistix BFGS converged."
@@ -1460,7 +1706,9 @@ def get_optimizer(name: str | Any = "auto", **kwargs):
     if not isinstance(name, str):
         if hasattr(name, "optimize") and callable(name.optimize):
             return name
-        raise TypeError(f"Expected optimizer name str or optimizer instance, got {type(name)!r}.")
+        raise TypeError(
+            f"Expected optimizer name str or optimizer instance, got {type(name)!r}."
+        )
 
     key = name.strip().lower()
     if key == "jaxopt":

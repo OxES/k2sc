@@ -2,27 +2,40 @@
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 from k2sc.detrender import Detrender
-from k2sc.kernels import BasicKernel, QuasiPeriodicKernel, pad_splits
+from k2sc.kernels import (
+    BasicKernel,
+    BasicKernelEP,
+    PeriodicKernel,
+    QuasiPeriodicKernel,
+    QuasiPeriodicKernelEP,
+    pad_splits,
+)
 from k2sc.optimizers import (
     MultiStartLBFGSBOptimizer,
     OptimistixOptimizer,
     OptimizationResult,
     VectorizedDEOptimizer,
+    _box_projected_grad_norm,
+    _compute_coordinate_scales,
     _jit_neglnposterior,
     _jit_val_and_grad,
     _jit_vmap_neglnposterior,
     _make_scipy_host_callback,
     _pv_to_unconstrained_np,
     _unconstrained_to_pv_jax,
+    compute_box_bounds,
     compute_closed_lims,
     get_optimizer,
+    polish_lbfgsb,
 )
-from k2sc.priors import UniformPrior, build_prior_spec
+from k2sc.priors import LogNormPrior, NormalPrior, UniformPrior, build_prior_spec
 
 
 @pytest.fixture(scope="module")
@@ -40,7 +53,9 @@ def spotted_star_harmonic_dataset() -> dict[str, object]:
     splits = [2340.0]
     roll_phase = ((t - 2300.0) / 0.254) % 1.0
     x = 0.35 * (roll_phase - 0.5) + 0.05 * np.sin(2.0 * np.pi * (t - 2300.0) / 45.0)
-    y_pos = -0.28 * (roll_phase - 0.5) + 0.04 * np.cos(2.0 * np.pi * (t - 2300.0) / 60.0)
+    y_pos = -0.28 * (roll_phase - 0.5) + 0.04 * np.cos(
+        2.0 * np.pi * (t - 2300.0) / 60.0
+    )
     inputs = np.column_stack([t, x, y_pos]).astype(np.float64)
 
     # Piecewise spatial sensitivity (~3000 ppm peak-to-peak roll systematics)
@@ -159,7 +174,9 @@ def test_closed_lims_and_logit_map_invariance():
 
         return -eval_ln_prior_jax(theta, u_spec)
 
-    grad_off_center = np.asarray(jax.grad(_u_loss)(jnp.asarray([2.3], dtype=jnp.float64)))
+    grad_off_center = np.asarray(
+        jax.grad(_u_loss)(jnp.asarray([2.3], dtype=jnp.float64))
+    )
     np.testing.assert_allclose(grad_off_center, [0.0], atol=1e-15)
 
 
@@ -186,13 +203,22 @@ def test_jit_neglnposterior_out_of_bounds_vmap_and_grad_safety(canonical_gp_data
     pv_inf[4] = np.inf
 
     batch = jnp.asarray(
-        np.stack([pv_valid, pv_at_zero_lower, pv_below, pv_above, pv_nan, pv_inf], axis=0),
+        np.stack(
+            [pv_valid, pv_at_zero_lower, pv_below, pv_above, pv_nan, pv_inf], axis=0
+        ),
         dtype=jnp.float64,
     )
 
     vals = np.asarray(
         _jit_vmap_neglnposterior(
-            batch, X_tr, y_tr, splits_pad, lims_low, lims_high, kernel.prior_spec, kernel.kernel_id
+            batch,
+            X_tr,
+            y_tr,
+            splits_pad,
+            lims_low,
+            lims_high,
+            kernel.prior_spec,
+            kernel.kernel_id,
         )
     )
     assert np.isfinite(vals[0])
@@ -208,7 +234,14 @@ def test_jit_neglnposterior_out_of_bounds_vmap_and_grad_safety(canonical_gp_data
     )
     grads = np.asarray(
         grad_fn(
-            batch, X_tr, y_tr, splits_pad, lims_low, lims_high, kernel.prior_spec, kernel.kernel_id
+            batch,
+            X_tr,
+            y_tr,
+            splits_pad,
+            lims_low,
+            lims_high,
+            kernel.prior_spec,
+            kernel.kernel_id,
         )
     )
     assert np.all(np.isfinite(grads)), f"Non-finite gradients encountered: {grads}"
@@ -310,10 +343,15 @@ def test_quasiperiodic_harmonic_trap_recovery(
     opt = get_optimizer(opt_name)
     res = opt.optimize(X_tr, y_tr, splits, trapped_kernel, pv0=pv0_trapped, seed=42)
 
-    # res.success reflects the internal polish solver's convergence flag, which can hit
-    # its iteration limit on slow CI runners while still producing a valid result.
-    # The meaningful checks are (a) finite parameters and (b) correct period recovered.
+    assert res.success, (
+        f"{opt_name} failed to converge: success={res.success} "
+        f"grad_norm={res.grad_norm:.3e} msg={res.message!r}"
+    )
     assert np.all(np.isfinite(res.pv)), f"{opt_name} returned non-finite pv: {res.pv}"
+    if opt_name in ("multistart", "de"):
+        assert res.njev < 600, (
+            f"{opt_name} used excessive gradient evaluations: {res.njev}"
+        )
 
     rel_period_err = abs(float(res.pv[2]) - p_true) / p_true
     assert rel_period_err < 0.02, (
@@ -339,3 +377,157 @@ def test_quasiperiodic_harmonic_trap_recovery(
     raw_pos_rms = float(np.std(pos_true_norm))
     resid_pos_rms = float(np.std(pos_true_norm - pos_pred_norm))
     assert resid_pos_rms < 0.25 * raw_pos_rms
+
+
+def test_box_bounds_closed_boundary_exactness_and_scale_invariance(
+    canonical_gp_dataset,
+):
+    """Verify exact closed bounds in compute_box_bounds, no 1e-12 shift, and scale-invariant grad_norm."""
+    X_tr = jnp.asarray(canonical_gp_dataset["X_tr"], dtype=jnp.float64)
+    y_tr = jnp.asarray(canonical_gp_dataset["y_tr"], dtype=jnp.float64)
+    s_pad = pad_splits(canonical_gp_dataset["splits"])
+
+    # compute_box_bounds must lift low to 1e-8 ONLY for LogNorm (or period) with low <= 0
+    qp = QuasiPeriodicKernel()
+    box = compute_box_bounds(qp.lims, prior_spec=qp.prior_spec, kernel_id=qp.kernel_id)
+    assert box[0] == (-6.0, 1.0)
+    assert box[1] == (1e-8, 2.0)
+    assert box[2] == (0.04, 45.0)
+    assert box[3] == (1e-8, 2.0)
+    assert box[4] == (-6.0, 0.0)
+    assert box[5] == (0.0, 70.0)
+    assert box[6] == (0.0, 70.0)
+    assert box[7] == (-6.0, 0.0)
+
+    # Exact closed boundary evaluation at pv0[0] == -6.0 and x_iscale == 0.0 (no 1e-12 shift)
+    for k_cls, zero_idx in (
+        (BasicKernel, 3),
+        (BasicKernelEP, 3),
+        (QuasiPeriodicKernel, 5),
+        (QuasiPeriodicKernelEP, 5),
+        (PeriodicKernel, 6),
+    ):
+        k = k_cls()
+        pv_b = k.pv0.copy()
+        pv_b[zero_idx] = 0.0
+        v_j, g_j = _jit_val_and_grad(
+            jnp.asarray(pv_b),
+            X_tr,
+            y_tr,
+            s_pad,
+            jnp.asarray(k.lims[0]),
+            jnp.asarray(k.lims[1]),
+            k.prior_spec,
+            k.kernel_id,
+        )
+        assert np.isfinite(float(v_j))
+        assert np.all(np.isfinite(np.asarray(g_j)))
+
+    # Coordinate scales for QuasiPeriodicKernel with tiny p3 ~ 1e-3 vs p5 ~ 21
+    pv_scaled = np.array(
+        [-4.5, 0.35, 7.3, 1e-3, -4.2, 21.0, 21.0, -3.5], dtype=np.float64
+    )
+    b_arr = np.asarray(box, dtype=np.float64)
+    scales = _compute_coordinate_scales(
+        pv_scaled,
+        b_arr[:, 0],
+        b_arr[:, 1],
+        qp.prior_spec,
+        kernel_id=qp.kernel_id,
+        kernel_bounds=qp.bounds,
+    )
+    assert 1e-3 <= scales[3] <= 0.1
+    assert 5.0 <= scales[5] <= 20.0
+
+    # _box_projected_grad_norm must be invariant under arbitrary diagonal coordinate rescaling
+    raw_grad = np.array([0.2, -1.5, 0.4, 2.6, -0.3, 0.05, -0.02, 0.1], dtype=np.float64)
+    gn1 = _box_projected_grad_norm(
+        pv_scaled, raw_grad, b_arr[:, 0], b_arr[:, 1], scales=scales
+    )
+    alpha = np.array([2.0, 5.0, 0.5, 100.0, 3.0, 0.1, 0.25, 4.0], dtype=np.float64)
+    gn2 = _box_projected_grad_norm(
+        pv_scaled * alpha,
+        raw_grad / alpha,
+        b_arr[:, 0] * alpha,
+        b_arr[:, 1] * alpha,
+        scales=scales * alpha,
+    )
+    np.testing.assert_allclose(gn1, gn2, rtol=1e-13, atol=1e-14)
+
+    # polish_lbfgsb starts cleanly from exact boundary QuasiPeriodicKernel().pv0 (pv[0] == -6.0)
+    pol = polish_lbfgsb(
+        qp.pv0,
+        X_tr,
+        y_tr,
+        s_pad,
+        jnp.asarray(qp.lims[0]),
+        jnp.asarray(qp.lims[1]),
+        qp.prior_spec,
+        qp.kernel_id,
+        box,
+        maxiter=40,
+        kernel_bounds=qp.bounds,
+    )
+    assert np.isfinite(pol.fun)
+    assert np.all(np.isfinite(pol.pv))
+
+
+def test_custom_dtkernel_empty_bounds_fallback_and_onesided_optx_wall(
+    canonical_gp_dataset,
+):
+    """Custom DtKernel with default bounds=[] and one-sided unbounded priors must optimize cleanly."""
+    X_tr = canonical_gp_dataset["X_tr"]
+    y_tr = canonical_gp_dataset["y_tr"]
+    splits = canonical_gp_dataset["splits"]
+
+    class CustomUnboundedBoundsKernel(BasicKernel):
+        bounds: ClassVar[list[list[float]]] = []  # Inherited DtKernel default
+        priors: ClassVar[list] = [
+            UniformPrior(-7.0, 1.0),
+            LogNormPrior(0.25, 1.25, lims=[0.0, np.inf]),  # only_low
+            UniformPrior(-7.0, 0.0),
+            NormalPrior(17.0, 8.0, lims=[0.0, np.inf]),  # only_low
+            NormalPrior(17.0, 8.0, lims=[-np.inf, 70.0]),  # only_high
+            UniformPrior(-6.0, 0.0),
+        ]
+
+    k_custom = CustomUnboundedBoundsKernel()
+    assert k_custom.bounds == []
+
+    for opt_name, kw in (
+        ("multistart", {"n_candidates": 16, "top_k": 2, "maxiter": 30}),
+        ("de", {"npop": 12, "niter": 3, "top_k": 1, "maxiter_polish": 30}),
+        ("optimistix", {"n_candidates": 16, "top_k": 2, "max_steps": 40}),
+    ):
+        opt = get_optimizer(opt_name, **kw)
+        res = opt.optimize(X_tr, y_tr, splits, CustomUnboundedBoundsKernel(), seed=7)
+        assert np.isfinite(res.fun)
+        assert np.all(np.isfinite(res.pv))
+
+    # Directly verify production one-sided saturation wall activates ONLY in saturated directions
+    from k2sc.optimizers import _optx_saturation_wall_jax
+
+    c_low = jnp.array([-6.0, 1e-7, -np.inf, -np.inf], dtype=jnp.float64)
+    c_high = jnp.array([1.0, np.inf, 70.0, np.inf], dtype=jnp.float64)
+
+    # Open directions (z = +20 on only_low, z = -20 on only_high, +/-20 on unbounded) -> wall == 0
+    z_open = jnp.array([10.0, 20.0, -20.0, 20.0], dtype=jnp.float64)
+    assert float(_optx_saturation_wall_jax(z_open, c_low, c_high)) == 0.0
+    np.testing.assert_array_equal(
+        np.asarray(jax.grad(_optx_saturation_wall_jax)(z_open, c_low, c_high)),
+        np.zeros(4),
+    )
+
+    # Saturated directions (z = -20 on only_low, z = +20 on only_high, |z| = 20 on both_fin) -> > 0
+    for z_sat, active_idx, expected_sign in (
+        (jnp.array([-20.0, 0.0, 0.0, 0.0], dtype=jnp.float64), 0, -1.0),
+        (jnp.array([0.0, -20.0, 0.0, 0.0], dtype=jnp.float64), 1, -1.0),
+        (jnp.array([0.0, 0.0, 20.0, 0.0], dtype=jnp.float64), 2, 1.0),
+    ):
+        val_w, grad_w = jax.value_and_grad(_optx_saturation_wall_jax)(
+            z_sat, c_low, c_high
+        )
+        np.testing.assert_allclose(float(val_w), 1e-8 * 36.0, rtol=1e-14)
+        np.testing.assert_allclose(
+            float(grad_w[active_idx]), expected_sign * 2e-8 * 6.0, rtol=1e-14
+        )

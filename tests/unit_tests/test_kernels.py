@@ -15,12 +15,16 @@ from k2sc.kernels import (
     MAX_SPLITS,
     BasicKernel,
     BasicKernelEP,
+    K2SCKernel,
+    K2SCSpatialKernel,
+    K2SCTimeKernel,
     PeriodicKernel,
     PiecewiseSpatialKernel,
     QuasiPeriodicKernel,
     QuasiPeriodicKernelEP,
     SafeL1Distance,
     build_tinygp_kernels,
+    canonicalize_inputs_jax,
     kernels,
     pad_splits,
 )
@@ -64,7 +68,9 @@ def test_safe_l1_distance_shapes_and_grads():
 
     # Zero-lag autodiff safety (1st and 2nd order, 0-D scalar and 1-D vector)
     g0 = jax.jit(jax.grad(lambda x: dist.distance(x, jnp.array(0.0))))(jnp.array(0.0))
-    h0 = jax.jit(jax.hessian(lambda x: dist.distance(x, jnp.array(0.0))))(jnp.array(0.0))
+    h0 = jax.jit(jax.hessian(lambda x: dist.distance(x, jnp.array(0.0))))(
+        jnp.array(0.0)
+    )
     assert g0.shape == () and float(g0) == 0.0
     assert h0.shape == () and float(h0) == 0.0
 
@@ -94,7 +100,9 @@ def test_pad_splits_and_none_vs_empty_equivalence():
     assert np.all(np.isposinf(np.asarray(s_many[20:])))
 
 
-def test_piecewise_spatial_kernel_psd_diag_tracing_and_masked_boundary(canonical_gp_dataset):
+def test_piecewise_spatial_kernel_psd_diag_tracing_and_masked_boundary(
+    canonical_gp_dataset,
+):
     X = canonical_gp_dataset["X"]
     X_fit = canonical_gp_dataset["X_fit"]
     splits = canonical_gp_dataset["splits"]
@@ -108,7 +116,9 @@ def test_piecewise_spatial_kernel_psd_diag_tracing_and_masked_boundary(canonical
 
     # Dynamic traced leaf check: splits_padded must be a dynamic JAX PyTree leaf
     leaves = jax.tree_util.tree_leaves(k_pos)
-    assert any(isinstance(leaf, jax.Array) and leaf.shape == (MAX_SPLITS,) for leaf in leaves)
+    assert any(
+        isinstance(leaf, jax.Array) and leaf.shape == (MAX_SPLITS,) for leaf in leaves
+    )
 
     @jax.jit
     def eval_k2_trace(X_in: jax.Array, s_pad: jax.Array) -> jax.Array:
@@ -121,7 +131,9 @@ def test_piecewise_spatial_kernel_psd_diag_tracing_and_masked_boundary(canonical
     assert eval_k2_trace._cache_size() == 1
 
     @jax.jit
-    def eval_kp_mat(kp_in: PiecewiseSpatialKernel, X1: jax.Array, X2: jax.Array) -> jax.Array:
+    def eval_kp_mat(
+        kp_in: PiecewiseSpatialKernel, X1: jax.Array, X2: jax.Array
+    ) -> jax.Array:
         return kp_in(X1, X2)
 
     @jax.jit
@@ -178,7 +190,9 @@ def test_all_five_kernels_init_bounds_lims_and_pv0_immutability():
     assert qp_iscale.period == 6.5
     assert qp_iscale.evolution_iscale == 0.09
 
-    custom_p0 = np.array([-5.1, 0.4, 7.7, 0.05, -4.6, 15.0, 19.0, -3.2], dtype=np.float64)
+    custom_p0 = np.array(
+        [-5.1, 0.4, 7.7, 0.05, -4.6, 15.0, 19.0, -3.2], dtype=np.float64
+    )
     custom_p0_copy = custom_p0.copy()
     qp_from_p0 = QuasiPeriodicKernel(p0=custom_p0)
     # Caller-supplied p0 must not be clobbered when period/evolution are None
@@ -200,12 +214,18 @@ def test_all_five_kernels_init_bounds_lims_and_pv0_immutability():
 
         bounds = np.asarray(inst.bounds, dtype=np.float64)
         assert bounds.shape == (inst.npar, 2)
-        assert np.all(inst.lims[0] < bounds[:, 0]), f"{name} lower bounds violate lims[0]"
+        assert np.all(inst.lims[0] < bounds[:, 0]), (
+            f"{name} lower bounds violate lims[0]"
+        )
         assert np.all(bounds[:, 0] < bounds[:, 1]), f"{name} inverted bounds"
-        assert np.all(bounds[:, 1] < inst.lims[1]), f"{name} upper bounds violate lims[1]"
+        assert np.all(bounds[:, 1] < inst.lims[1]), (
+            f"{name} upper bounds violate lims[1]"
+        )
 
 
-@pytest.mark.parametrize("k_cls", [QuasiPeriodicKernel, QuasiPeriodicKernelEP, PeriodicKernel])
+@pytest.mark.parametrize(
+    "k_cls", [QuasiPeriodicKernel, QuasiPeriodicKernelEP, PeriodicKernel]
+)
 @pytest.mark.parametrize("p1_val", [0.05, 0.25, 1.0, 1.45, 1.99])
 def test_quasiperiodic_and_periodic_psd_across_full_p1_support(
     canonical_gp_dataset, k_cls, p1_val
@@ -245,7 +265,9 @@ def test_all_five_kernels_matrix_parity_vs_reference_numpy(
     npt.assert_allclose(K1_init, K1_set, rtol=0.0, atol=1e-15)
     npt.assert_allclose(K2_init, K2_set, rtol=0.0, atol=1e-15)
 
-    K1_ref, K2_ref, wn_var_ref = ref.kernel_matrices_numpy(kname, pv, X_tr, None, splits=splits)
+    K1_ref, K2_ref, wn_var_ref = ref.kernel_matrices_numpy(
+        kname, pv, X_tr, None, splits=splits
+    )
     npt.assert_allclose(K1_set, K1_ref, rtol=1e-12, atol=1e-12)
     npt.assert_allclose(K2_set, K2_ref, rtol=1e-12, atol=1e-12)
 
@@ -259,7 +281,9 @@ def test_all_five_kernels_matrix_parity_vs_reference_numpy(
 
     # Rectangular cross-covariance (N=128, N_tr=64)
     K1_rect, K2_rect = gp._covariance_matrix(X, X_tr, pv=pv, separate=True)
-    K1_rect_ref, K2_rect_ref, _ = ref.kernel_matrices_numpy(kname, pv, X, X_tr, splits=splits)
+    K1_rect_ref, K2_rect_ref, _ = ref.kernel_matrices_numpy(
+        kname, pv, X, X_tr, splits=splits
+    )
     npt.assert_allclose(K1_rect, K1_rect_ref, rtol=1e-12, atol=1e-12)
     npt.assert_allclose(K2_rect, K2_rect_ref, rtol=1e-12, atol=1e-12)
 
@@ -283,3 +307,98 @@ def test_all_five_kernels_matrix_parity_vs_reference_numpy(
             rtol=1e-12,
             atol=1e-12,
         )
+
+
+@pytest.mark.parametrize("kname", list(kernels.keys()))
+def test_two_column_inputs_canonicalization_and_invalid_shape_errors(
+    canonical_gp_dataset, kname: str
+):
+    """2-column [t, x] inputs must match 3-column [t, x, 0] in __call__ and scalar evaluate."""
+    X_full = canonical_gp_dataset["X_tr"][:16]
+    X_2col = X_full[:, :2].copy()
+    X_3col_zero_y = np.column_stack(
+        [X_2col, np.zeros(X_2col.shape[0], dtype=np.float64)]
+    )
+    s_pad = pad_splits(canonical_gp_dataset["splits"])
+
+    k = kernels[kname]()
+    pv = jnp.asarray(k.pv0, dtype=jnp.float64)
+    k_tot = K2SCKernel(pv, s_pad, k.kernel_id)
+    k_t = K2SCTimeKernel(pv, k.kernel_id)
+    k_sp = K2SCSpatialKernel(pv, s_pad, k.kernel_id)
+
+    X2_j = jnp.asarray(X_2col, dtype=jnp.float64)
+    X3_j = jnp.asarray(X_3col_zero_y, dtype=jnp.float64)
+
+    # Vectorized matrix and diagonal calls must match [t, x, 0] exactly
+    npt.assert_allclose(
+        np.asarray(k_tot(X2_j, X2_j)),
+        np.asarray(k_tot(X3_j, X3_j)),
+        rtol=1e-14,
+        atol=1e-15,
+    )
+    npt.assert_allclose(
+        np.asarray(k_tot(X2_j)), np.asarray(k_tot(X3_j)), rtol=1e-14, atol=1e-15
+    )
+    npt.assert_allclose(
+        np.asarray(k_sp(X2_j, X2_j)),
+        np.asarray(k_sp(X3_j, X3_j)),
+        rtol=1e-14,
+        atol=1e-15,
+    )
+    npt.assert_allclose(
+        np.asarray(k_t(X2_j, X2_j)), np.asarray(k_t(X3_j, X3_j)), rtol=1e-14, atol=1e-15
+    )
+
+    # Scalar evaluate must NOT clamp X[2] -> X[1] (y must be 0, not x!)
+    for i, j in ((0, 1), (2, 7), (0, 15)):
+        npt.assert_allclose(
+            float(k_tot.evaluate(X2_j[i], X2_j[j])),
+            float(k_tot.evaluate(X3_j[i], X3_j[j])),
+            rtol=1e-14,
+            atol=1e-15,
+        )
+        npt.assert_allclose(
+            float(k_sp.evaluate(X2_j[i], X2_j[j])),
+            float(k_sp.evaluate(X3_j[i], X3_j[j])),
+            rtol=1e-14,
+            atol=1e-15,
+        )
+
+    # Invalid dimensions/column counts must raise clear ValueError
+    if kname == "basic":
+        for bad in (
+            np.zeros((8,), dtype=np.float64),
+            np.zeros((8, 1), dtype=np.float64),
+            np.zeros((8, 4), dtype=np.float64),
+            np.zeros((2, 4, 3), dtype=np.float64),
+        ):
+            with pytest.raises(ValueError, match=r"\(N, 2\) or \(N, 3\)"):
+                canonicalize_inputs_jax(bad)
+            with pytest.raises(ValueError, match=r"\(N, 2\) or \(N, 3\)"):
+                k_tot(jnp.asarray(bad))
+        for bad_pt in (
+            jnp.zeros((1,), dtype=jnp.float64),
+            jnp.zeros((4,), dtype=jnp.float64),
+        ):
+            with pytest.raises(ValueError, match="length 2 or 3"):
+                k_tot.evaluate(bad_pt, X2_j[0])
+
+
+@pytest.mark.parametrize("kname", list(kernels.keys()))
+def test_map_pv_zero_iscale_emits_no_runtime_warning(kname: str):
+    """Zero inverse-scale parameters in map_pv must map cleanly to +inf without RuntimeWarning."""
+    k = kernels[kname]()
+    pv = k.pv0.copy()
+    if kname in ("basic", "basic_ep"):
+        zero_indices = (1, 3, 4)
+    elif kname in ("quasiperiodic", "quasiperiodic_ep"):
+        zero_indices = (1, 3, 5, 6)
+    else:
+        zero_indices = (1, 4, 6, 7)
+
+    for idx in zero_indices:
+        pv[idx] = 0.0
+    pm = k.map_pv(pv)
+    for idx in zero_indices:
+        assert np.isposinf(pm[idx])

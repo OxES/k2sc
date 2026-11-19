@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import time
+import zlib
 
 import jax
 import numpy as np
@@ -18,7 +19,7 @@ from .optimizers import (
     _jit_neglnposterior,
     _jit_neglnposterior_precomputed,
     _jit_val_and_grad_precomputed,
-    compute_closed_lims,
+    compute_box_bounds,
     get_optimizer,
     polish_lbfgsb,
 )
@@ -70,6 +71,7 @@ class Detrender:
             nblocks=tr_nblocks,
             bspan=tr_bspan,
             rng=self._rng,
+            splits=self.gp.splits,
         )
         self.gp.set_inputs(self.tr_data.masked_inputs)
 
@@ -77,9 +79,12 @@ class Detrender:
         self._y_tr_jax = as_f64(self.tr_data.masked_normalised_flux)
         self._lims_low_jax = as_f64(self.kernel.lims[0])
         self._lims_high_jax = as_f64(self.kernel.lims[1])
+        self._prior_spec = self.kernel.prior_spec
         self._splits_pad_tr = pad_splits(self.gp.splits)
         self._precomp_tr: PrecomputedPairwise | None = None
         self._precomp_splits_key: tuple[float, ...] | None = None
+        self._tr_data_key = self._tr_data_fingerprint()
+        self._kernel_key = self._kernel_fingerprint()
 
         self.tr_pv: np.ndarray | None = None
         self.opt_result: OptimizationResult | None = None
@@ -92,7 +97,56 @@ class Detrender:
     def time(self) -> np.ndarray:
         return self.data.masked_time
 
+    def _tr_data_fingerprint(self) -> tuple:
+        inp = np.ascontiguousarray(self.tr_data._inputs, dtype=np.float64)
+        flx = np.ascontiguousarray(self.tr_data._flux, dtype=np.float64)
+        msk = np.ascontiguousarray(self.tr_data._mask, dtype=np.bool_)
+        fm_key = float(self.tr_data._fm) if np.isfinite(self.tr_data._fm) else "nan"
+        return (
+            id(self.tr_data),
+            inp.shape,
+            zlib.crc32(inp.view(np.uint8)),
+            flx.shape,
+            zlib.crc32(flx.view(np.uint8)),
+            msk.shape,
+            zlib.crc32(msk.view(np.uint8)),
+            fm_key,
+        )
+
+    def _kernel_fingerprint(self) -> tuple:
+        lims_arr = np.ascontiguousarray(self.kernel.lims, dtype=np.float64)
+        return (
+            id(self.kernel),
+            self.kernel.kernel_id,
+            lims_arr.shape,
+            zlib.crc32(lims_arr.view(np.uint8)),
+            id(self.kernel.prior_spec),
+        )
+
+    def _sync_tr_data_cache(self) -> None:
+        key = self._tr_data_fingerprint()
+        if key != self._tr_data_key:
+            self._X_tr_jax = as_f64(self.tr_data.masked_inputs)
+            self._y_tr_jax = as_f64(self.tr_data.masked_normalised_flux)
+            self._precomp_tr = None
+            self._precomp_splits_key = None
+            self.gp.set_inputs(self.tr_data.masked_inputs)
+            self._tr_data_key = key
+
+    def _sync_kernel_cache(self) -> None:
+        key = self._kernel_fingerprint()
+        if key != self._kernel_key:
+            self._lims_low_jax = as_f64(self.kernel.lims[0])
+            self._lims_high_jax = as_f64(self.kernel.lims[1])
+            self._prior_spec = self.kernel.prior_spec
+            if self.gp.kernel is not self.kernel:
+                self.gp.kernel = self.kernel
+                self.gp.set_dirty(True)
+            self._kernel_key = key
+
     def _training_precomp(self) -> PrecomputedPairwise:
+        self._sync_tr_data_cache()
+        self._sync_kernel_cache()
         splits_pad_now = pad_splits(self.gp.splits)
         if isinstance(splits_pad_now, jax.core.Tracer):
             return precompute_pairwise_jax(self._X_tr_jax, splits_pad_now)
@@ -106,6 +160,7 @@ class Detrender:
         return self._precomp_tr
 
     def _objective_tensors(self, training: bool = True):
+        self._sync_kernel_cache()
         if training:
             self._training_precomp()
             return (
@@ -121,6 +176,7 @@ class Detrender:
         return X_jax, y_jax, splits_pad, self._lims_low_jax, self._lims_high_jax
 
     def covariance_matrix(self, pv=None, inputs=None, separate: bool = False):
+        self._sync_kernel_cache()
         inputs = inputs if inputs is not None else self.tr_data.masked_inputs
         self.gp.compute(inputs, pv)
         return self.gp._covariance_matrix(inputs, separate=separate)
@@ -135,7 +191,7 @@ class Detrender:
                 self._y_tr_jax,
                 self._lims_low_jax,
                 self._lims_high_jax,
-                self.kernel.prior_spec,
+                self._prior_spec,
                 self.kernel.kernel_id,
             )
         X_jax, y_jax, splits_pad, lims_low, lims_high = self._objective_tensors(
@@ -148,7 +204,7 @@ class Detrender:
             splits_pad,
             lims_low,
             lims_high,
-            self.kernel.prior_spec,
+            self._prior_spec,
             self.kernel.kernel_id,
         )
 
@@ -176,8 +232,12 @@ class Detrender:
             training=True
         )
         precomp_tr = self._training_precomp()
-        closed_lims = compute_closed_lims(self.kernel.lims)
-        c_arr = np.asarray(closed_lims, dtype=np.float64)
+        box_bounds = compute_box_bounds(
+            self.kernel.lims,
+            prior_spec=self._prior_spec,
+            kernel_id=self.kernel.kernel_id,
+        )
+        c_arr = np.asarray(box_bounds, dtype=np.float64)
         x0_clipped = np.clip(x0, c_arr[:, 0], c_arr[:, 1])
 
         method_clean = method.strip()
@@ -192,13 +252,14 @@ class Detrender:
                 splits_pad,
                 lims_low,
                 lims_high,
-                self.kernel.prior_spec,
+                self._prior_spec,
                 self.kernel.kernel_id,
-                closed_lims,
+                box_bounds,
                 ftol=ftol,
                 gtol=gtol,
                 maxiter=maxiter,
                 precomp=precomp_tr,
+                kernel_bounds=self.kernel.bounds,
             )
         else:
             t0 = time.perf_counter()
@@ -213,7 +274,7 @@ class Detrender:
                         y_jax,
                         lims_low,
                         lims_high,
-                        self.kernel.prior_spec,
+                        self._prior_spec,
                         self.kernel.kernel_id,
                     )
                 )
@@ -224,7 +285,7 @@ class Detrender:
                 options["maxiter"] = int(kwargs["maxiter"])
             min_kwargs = {"method": method_clean, "options": options}
             if method_clean.lower() in ("powell", "nelder-mead", "tnc", "slsqp"):
-                min_kwargs["bounds"] = closed_lims
+                min_kwargs["bounds"] = box_bounds
 
             mres = minimize(_scalar_obj, x0_clipped, **min_kwargs)
             cand_x = np.clip(
@@ -236,7 +297,7 @@ class Detrender:
                 y_jax,
                 lims_low,
                 lims_high,
-                self.kernel.prior_spec,
+                self._prior_spec,
                 self.kernel.kernel_id,
             )
             fin_val = float(fin_val_j)
@@ -278,6 +339,7 @@ class Detrender:
         **kwargs,
     ) -> OptimizationResult:
         """Global + exact-gradient local hyperparameter optimization."""
+        self._sync_kernel_cache()
         opt = get_optimizer(optimizer, **kwargs)
         ds = self.tr_data if training else self.data
         opt_call_kwargs: dict[str, object] = {"pv0": pv0, "seed": seed}
@@ -302,6 +364,7 @@ class Detrender:
         components: bool = False,
         mean_only: bool = True,
     ):
+        self._sync_kernel_cache()
         inputs = inputs if inputs is not None else self.data.unmasked_inputs
         self.gp.compute(self.data.masked_inputs, pv)
         self.gp._compute_alpha(
@@ -336,6 +399,17 @@ class Detrender:
         if ax is None:
             _, ax = plt.subplots(1, 1, figsize=(10, 10))
 
+        if self.data.nptm == 0:
+            ax.text(
+                0.5,
+                0.5,
+                "No unmasked data points",
+                ha="center",
+                va="center",
+                transform=ax.transAxes,
+            )
+            return ax
+
         if pv is None:
             ax.tripcolor(
                 self.data.mx,
@@ -360,6 +434,19 @@ class Detrender:
         if ax is None:
             _, ax = plt.subplots(1, 1)
 
+        if self.data.nptm == 0:
+            ax.set_xlabel("Time")
+            ax.set_ylabel("Flux")
+            ax.text(
+                0.5,
+                0.5,
+                "No unmasked data points",
+                ha="center",
+                va="center",
+                transform=ax.transAxes,
+            )
+            return ax
+
         fm = self.data.flux_median
         fmin = float(np.min(self.data.masked_flux))
         fmax = float(np.max(self.data.masked_flux))
@@ -367,7 +454,8 @@ class Detrender:
 
         ax.plot(self.data.mt, self.data.mf, c="0.75", lw=1)
         ax.plot(self.tr_data.ut, self.tr_data.uf, ".k", ms=6)
-        plt.setp(ax, ylim=(0.999 * fmin, 1.001 * fmax))
+        if fmax > fmin:
+            plt.setp(ax, ylim=(0.999 * fmin, 1.001 * fmax))
 
         if pv is not None:
             fd = self.detrend_spatial(pv)
@@ -379,9 +467,12 @@ class Detrender:
                 alpha=0.75,
                 lw=1,
             )
-            plt.setp(ax, ylim=(0.999 * (fmin - 0.7 * fptp), 1.001 * fmax))
+            if fmax > fmin - 0.7 * fptp:
+                plt.setp(ax, ylim=(0.999 * (fmin - 0.7 * fptp), 1.001 * fmax))
 
-        plt.setp(ax, xlim=self.data.mt[[0, -1]], xlabel="Time", ylabel="Flux")
+        if self.data.mt.size >= 2 and self.data.mt[-1] > self.data.mt[0]:
+            plt.setp(ax, xlim=self.data.mt[[0, -1]])
+        plt.setp(ax, xlabel="Time", ylabel="Flux")
         return ax
 
     def plot_report(self, pv, tid, fname=None, maxpt: int = 350):
@@ -393,9 +484,7 @@ class Detrender:
 
         fig = plt.figure(figsize=(8.3, 11.7))
         title_str = (
-            f"EPIC {int(tid):9d}"
-            if isinstance(tid, (int, np.integer))
-            else f"{tid}"
+            f"EPIC {int(tid):9d}" if isinstance(tid, (int, np.integer)) else f"{tid}"
         )
         fig.text(
             0.04,
@@ -417,6 +506,24 @@ class Detrender:
         ax_x = fig.add_axes([lmargin, 0.05, 1 - lmargin - rmargin, 0.1])
         ax_y = fig.add_axes([lmargin, 0.15, 1 - lmargin - rmargin, 0.1])
         ax_c = fig.add_axes([0.55, 0.6, 0.45 - rmargin, 0.3])
+
+        if self.data.nptm == 0:
+            ax_a.text(
+                0.5,
+                0.5,
+                "No unmasked data points",
+                ha="center",
+                va="center",
+                transform=ax_a.transAxes,
+            )
+            plt.setp(ax_a.get_xticklabels() + ax_y.get_xticklabels(), visible=False)
+            plt.setp(ax_x, xlabel="Time", ylabel="X")
+            plt.setp(ax_c, xlabel="X", ylabel="Y")
+            plt.setp(ax_a, ylabel="Normalised flux")
+            plt.setp(ax_y, ylabel="Y")
+            if fname:
+                fig.savefig(fname)
+            return fig
 
         ax_x.plot(self.data.masked_time, self.data.mx, lw=1)
         ax_y.plot(self.data.masked_time, self.data.my, lw=1)
@@ -449,11 +556,13 @@ class Detrender:
         ax_c.plot(self.tr_data.mx, self.tr_data.my, ".", ms=3, c="w", alpha=0.8)
         ax_c.plot(self.tr_data.mx, self.tr_data.my, ".", ms=1.5, c="k")
 
-        plt.setp(ax_a, ylim=(0.999 * (fmin - 1.4 * fptp) / fm, 1.001 * fmax / fm))
+        if fmax > fmin - 1.4 * fptp and fm != 0.0:
+            plt.setp(ax_a, ylim=(0.999 * (fmin - 1.4 * fptp) / fm, 1.001 * fmax / fm))
         plt.setp(ax_a.get_xticklabels() + ax_y.get_xticklabels(), visible=False)
         plt.setp(ax_x, xlabel="Time", ylabel="X")
         plt.setp(ax_c, xlabel="X", ylabel="Y")
-        plt.setp([ax_a, ax_x, ax_y], xlim=self.time[[0, -1]])
+        if self.time.size >= 2 and self.time[-1] > self.time[0]:
+            plt.setp([ax_a, ax_x, ax_y], xlim=self.time[[0, -1]])
         plt.setp(ax_a, ylabel="Normalised flux")
         plt.setp(ax_y, ylabel="Y")
 
