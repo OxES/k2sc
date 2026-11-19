@@ -1,15 +1,16 @@
-"""Utility functions — JAX-backed implementations.
+"""Utility functions — pure-NumPy float64 implementations.
 
-Provides ``fold``, ``medsig``, and ``sigma_clip`` as pure-JAX / NumPy
-functions with static shapes, preserving the full legacy calling contract.
+Provides ``fold``, ``medsig``, and ``sigma_clip`` in pure NumPy while
+preserving the legacy calling contract.
 
 Changes from v1:
 * ``from numpy import *`` wildcard removed.
-* ``medsig`` uses ``jnp.nanmedian`` internally but falls back cleanly for
-  the 0-finite and 1-finite edge cases.
-* ``sigma_clip`` uses a ``jax.lax.while_loop`` with static boolean masks
-  (``jnp.where(..., jnp.nan, a)`` + ``jnp.nanmedian``) so the shape never
-  changes inside the loop.  Returns standard NumPy boolean arrays.
+* ``medsig`` filters finite values via ``np.isfinite`` and ``np.median``,
+  falling back cleanly to ``(nan, nan)`` for 0 finite elements and
+  ``(value, nan)`` for 1 finite element.
+* ``sigma_clip`` iterates in pure NumPy with fixed-shape boolean masks
+  (``mexc``, ``mlow``, ``mhigh``) and ``medsig``, handling zero-MAD
+  (constant) arrays cleanly and returning standard NumPy boolean arrays.
 """
 
 from __future__ import annotations
@@ -123,7 +124,11 @@ def sigma_clip(
         Boolean mask(s) of the same shape as ``a``.
     """
     a = np.asarray(a, dtype=np.float64)
-    mexc = np.isfinite(a) if mexc is None else np.isfinite(a) & np.asarray(mexc, dtype=bool)
+    mexc = (
+        np.isfinite(a)
+        if mexc is None
+        else np.isfinite(a) & np.asarray(mexc, dtype=bool)
+    )
     mhigh = np.ones(a.shape, dtype=bool)
     mlow = np.ones(a.shape, dtype=bool)
     mask = np.ones(a.shape, dtype=bool)

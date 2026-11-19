@@ -1,19 +1,20 @@
-"""Lomb-Scargle periodogram — vectorised pure-JAX implementation.
+"""Lomb-Scargle periodogram — vectorized pure-JAX implementation.
 
 Two public functions are provided:
 
 * ``fasper(x, y, ofac, hifac, MACC=4)`` — fast Press & Rybicki (1989) FFT
   periodogram.  Returns the legacy 5-tuple ``(wk1, wk2, nout, jmax, prob)``
   as float64 NumPy arrays for 100 % caller compatibility.  The scalar Python
-  ``__spread__`` loop is replaced by a vectorised ``(N, MACC)`` Lagrange-weight
+  ``__spread__`` loop is replaced by a vectorized ``(N, MACC)`` Lagrange-weight
   extirpolation using ``jnp.zeros(...).at[idx].add(w)`` and ``jnp.fft.ifft``.
   The ``hypo == 0`` branch (exact uniform grids) is guarded with ``jnp.where``
-  so it never produces ``0/0 = NaN``.
+  using the exact ``tau = 0`` limit (``hc2wt = 0.5``, two-valued Fortran
+  ``SIGN``) so it never produces ``0/0 = NaN`` or violates ``c^2 + s^2 = 1``.
 
 * ``ls_periodogram_jax(time, flux, min_period, max_period, samples_per_peak)``
   — exact Townsend (2010) / Scargle (1982) direct LS periodogram evaluated on
   ``[1/max_period, 1/min_period]``, chunked via ``jax.lax.map`` for memory
-  efficiency.
+  efficiency with ``t - t[0]`` origin shifting for high-BJD precision.
 
 * ``psearch(time, flux, min_p, max_p)`` — thin wrapper returning the
   peak ``(period, fap)`` using the ``fasper``-based analytical FAP.
@@ -40,6 +41,7 @@ ensure_float64()
 # ---------------------------------------------------------------------------
 # Vectorised extirpolation (replaces scalar __spread__ loop)
 # ---------------------------------------------------------------------------
+
 
 def _make_extirpolate(m: int):
     """Return a JIT-compiled extirpolation function for a fixed MACC=m.
@@ -70,7 +72,7 @@ def _make_extirpolate(m: int):
 
         # Lagrange weight for support point k (0-indexed)
         def weight_k(k):
-            diffs = idx[k] - idx          # shape (m,): 0 at k
+            diffs = idx[k] - idx  # shape (m,): 0 at k
             safe_diffs = jnp.where(k_range == k, jnp.ones(m, dtype=jnp.float64), diffs)
             nden = jnp.prod(safe_diffs)
             x_minus_xk = x - idx[k]
@@ -106,6 +108,7 @@ _EXTIRPOLATE_CACHE: dict[int, object] = {}
 # ---------------------------------------------------------------------------
 # fasper — public API
 # ---------------------------------------------------------------------------
+
 
 def fasper(
     x,
@@ -151,8 +154,19 @@ def fasper(
     n = len(x)
     if n != len(y):
         raise ValueError("Incompatible arrays: len(x) != len(y)")
+    if n < 2:
+        raise ValueError("fasper requires at least 2 data points")
+    if ofac <= 0.0 or hifac <= 0.0:
+        raise ValueError("ofac and hifac must be positive")
+    if MACC < 1:
+        raise ValueError("MACC must be at least 1")
 
     nout = int(0.5 * ofac * hifac * n)
+    if nout < 1:
+        raise ValueError(
+            "fasper produced zero output frequencies (nout < 1); "
+            "increase ofac, hifac, or input length"
+        )
     nfreqt = int(ofac * hifac * n * MACC)
     nfreq = 64
     while nfreq < nfreqt:
@@ -161,9 +175,13 @@ def fasper(
 
     ave = y.mean()
     var = float(((y - ave) ** 2).sum() / (n - 1))
-    xmin = x.min()
-    xmax = x.max()
+    xmin = float(x.min())
+    xmax = float(x.max())
     xdif = float(xmax - xmin)
+    if not np.isfinite(xdif) or xdif <= 0.0:
+        raise ValueError(
+            "fasper requires finite timestamps with a positive baseline (max(x) > min(x))"
+        )
 
     fac = ndim / (xdif * ofac)
     fndim = float(ndim)
@@ -199,22 +217,28 @@ def fasper(
     # Compute Lomb value — guard hypo == 0 (exact uniform grid → NaN-free)
     hypo2 = 2.0 * jnp.abs(wk2_slice)
 
-    # When hypo2 == 0 (perfectly uniform spacing), the Lomb time-offset tau
-    # is degenerate; substitute 0 → cos(2 omega tau)=1, sin(2 omega tau)=0.
-    safe_hypo2 = jnp.where(hypo2 > 1e-30, hypo2, jnp.ones_like(hypo2))
-    hc2wt = jnp.where(hypo2 > 1e-30, rwk2 / safe_hypo2, jnp.zeros_like(rwk2))
-    hs2wt = jnp.where(hypo2 > 1e-30, iwk2 / safe_hypo2, jnp.zeros_like(iwk2))
+    # When hypo2 <= 1e-30 (e.g. uniform spacing where sum exp(2i omega t) = 0),
+    # set tau = 0 so cos(2*omega*tau) = 1 -> hc2wt = +0.5 and sin(2*omega*tau) = 0 -> hs2wt = 0.0.
+    nonzero_hypo = hypo2 > 1e-30
+    safe_hypo2 = jnp.where(nonzero_hypo, hypo2, jnp.ones_like(hypo2))
+    hc2wt = jnp.where(nonzero_hypo, rwk2 / safe_hypo2, jnp.full_like(rwk2, 0.5))
+    hs2wt = jnp.where(nonzero_hypo, iwk2 / safe_hypo2, jnp.zeros_like(iwk2))
 
     cwt = jnp.sqrt(jnp.clip(0.5 + hc2wt, 0.0, None))
-    swt = jnp.sign(hs2wt) * jnp.sqrt(jnp.clip(0.5 - hc2wt, 0.0, None))
+    # Two-valued Fortran SIGN(1.0, hs2wt): +1 for hs2wt >= 0, -1 for hs2wt < 0.
+    # Avoid jnp.sign(0.0) == 0.0, which violates cwt^2 + swt^2 = 1 when hs2wt == 0.
+    swt_sign = jnp.where(hs2wt >= 0.0, 1.0, -1.0)
+    swt = swt_sign * jnp.sqrt(jnp.clip(0.5 - hc2wt, 0.0, None))
 
     den = 0.5 * n + hc2wt * rwk2 + hs2wt * iwk2
     n_minus_den = n - den
     safe_den = jnp.where(den > 1e-30, den, jnp.ones_like(den))
-    safe_nmd = jnp.where(jnp.abs(n_minus_den) > 1e-30, n_minus_den, jnp.ones_like(n_minus_den))
+    safe_nmd = jnp.where(n_minus_den > 1e-30, n_minus_den, jnp.ones_like(n_minus_den))
 
-    cterm = (cwt * rwk1 + swt * iwk1) ** 2 / safe_den
-    sterm = (cwt * iwk1 - swt * rwk1) ** 2 / safe_nmd
+    cterm = jnp.where(den > 1e-30, (cwt * rwk1 + swt * iwk1) ** 2 / safe_den, 0.0)
+    sterm = jnp.where(
+        n_minus_den > 1e-30, (cwt * iwk1 - swt * rwk1) ** 2 / safe_nmd, 0.0
+    )
 
     freqs = df * (jnp.arange(nout, dtype=jnp.float64) + 1.0)
     if var > 0.0:
@@ -244,6 +268,7 @@ def fasper(
 # ---------------------------------------------------------------------------
 # Exact Townsend (2010) direct LS periodogram
 # ---------------------------------------------------------------------------
+
 
 def _ls_at_frequencies(
     time: jax.Array,
@@ -283,13 +308,13 @@ def _ls_at_frequencies(
 
     yc = jnp.sum(flux_centered[None, :] * cos_pt, axis=1)  # (F,)
     ys = jnp.sum(flux_centered[None, :] * sin_pt, axis=1)  # (F,)
-    cc = jnp.sum(cos_pt ** 2, axis=1)  # (F,)
-    ss = jnp.sum(sin_pt ** 2, axis=1)  # (F,)
+    cc = jnp.sum(cos_pt**2, axis=1)  # (F,)
+    ss = jnp.sum(sin_pt**2, axis=1)  # (F,)
 
     safe_cc = jnp.where(cc > 1e-30, cc, jnp.ones_like(cc))
     safe_ss = jnp.where(ss > 1e-30, ss, jnp.ones_like(ss))
 
-    return 0.5 * (yc ** 2 / safe_cc + ys ** 2 / safe_ss)
+    return 0.5 * (yc**2 / safe_cc + ys**2 / safe_ss)
 
 
 def ls_periodogram_jax(
@@ -330,8 +355,21 @@ def ls_periodogram_jax(
     """
     time = jnp.asarray(time, dtype=jnp.float64)
     flux = jnp.asarray(flux, dtype=jnp.float64)
+    if time.size != flux.size:
+        raise ValueError("Incompatible arrays: len(time) != len(flux)")
+    if time.size < 2:
+        raise ValueError("ls_periodogram_jax requires at least 2 data points")
+    if min_period <= 0.0 or max_period <= min_period:
+        raise ValueError("Require 0 < min_period < max_period")
 
-    t_span = float(time.max() - time.min())
+    # Recentre timestamps relative to t[0] for high-BJD trigonometric precision
+    t_rel = time - time[0]
+    t_span = float(t_rel.max() - t_rel.min())
+    if not np.isfinite(t_span) or t_span <= 0.0:
+        raise ValueError(
+            "ls_periodogram_jax requires finite timestamps with a positive baseline "
+            "(max(time) > min(time))"
+        )
     f_min = 1.0 / float(max_period)
     f_max = 1.0 / float(min_period)
     n_freqs = max(1, int(samples_per_peak * t_span * (f_max - f_min)) + 1)
@@ -343,10 +381,12 @@ def ls_periodogram_jax(
     # Pad to multiple of chunk_size for static shapes
     n_pad = chunk_size * ((n_freqs + chunk_size - 1) // chunk_size)
     if n_pad > n_freqs:
-        freqs_pad = jnp.concatenate([
-            freqs,
-            jnp.full(n_pad - n_freqs, freqs[-1], dtype=jnp.float64),
-        ])
+        freqs_pad = jnp.concatenate(
+            [
+                freqs,
+                jnp.full(n_pad - n_freqs, freqs[-1], dtype=jnp.float64),
+            ]
+        )
     else:
         freqs_pad = freqs
 
@@ -354,7 +394,7 @@ def ls_periodogram_jax(
 
     @jax.jit
     def _eval_chunk(freq_chunk):
-        return _ls_at_frequencies(time, flux_centered, freq_chunk)
+        return _ls_at_frequencies(t_rel, flux_centered, freq_chunk)
 
     power_pad = jax.lax.map(_eval_chunk, freqs_chunks)  # (n_chunks, chunk_size)
     power_flat = power_pad.reshape(-1)[:n_freqs]
@@ -362,16 +402,19 @@ def ls_periodogram_jax(
     if var > 0.0:
         power_norm = power_flat / var
     else:
-        power_norm = power_flat
+        power_norm = jnp.zeros_like(power_flat)
 
     period = jnp.where(freqs > 0.0, 1.0 / freqs, jnp.full_like(freqs, jnp.inf))
 
-    return np.asarray(period[::-1], dtype=np.float64), np.asarray(power_norm[::-1], dtype=np.float64)
+    return np.asarray(period[::-1], dtype=np.float64), np.asarray(
+        power_norm[::-1], dtype=np.float64
+    )
 
 
 # ---------------------------------------------------------------------------
 # psearch — matches standalone.py:22-39 analytical FAP formula
 # ---------------------------------------------------------------------------
+
 
 def psearch(
     time,
@@ -407,6 +450,8 @@ def psearch(
     freq, power, nout, _jmax, _prob = fasper(time, flux, 6, 0.5)
     period = 1.0 / freq
     m = (period > min_p) & (period < max_p)
+    if not np.any(m):
+        return float("nan"), 1.0
     period_m, power_m = period[m], power[m]
     j = int(np.argmax(power_m))
 
@@ -422,6 +467,7 @@ def psearch(
 # ---------------------------------------------------------------------------
 # Legacy helper kept for backwards compatibility
 # ---------------------------------------------------------------------------
+
 
 def getSignificance(wk1, wk2, nout, ofac):
     """Return false-alarm probabilities for all periodogram peaks."""
